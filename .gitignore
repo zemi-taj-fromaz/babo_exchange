@@ -1,0 +1,19 @@
+# Build output
+/build/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+_deps/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.user
+
+# OS cruft
+.DS_Store
+Thumbs.db

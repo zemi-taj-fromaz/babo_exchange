@@ -59,6 +59,10 @@ private:
     // the local book reconstruction.
     void applyOrderEvent(const feed::OrderEvent& event);
 
+    // Consumer side: render top-of-book depth from the same engine thread that
+    // owns the book, avoiding cross-thread reads.
+    void renderDepth(std::uint64_t appliedEvents);
+
     // Snapshot-reproduction future: created in the network thread, consumed
     // (get()) in the engine thread.
     std::future<void> reproduceSnapshotFuture_;

@@ -111,13 +111,10 @@ void BitstampFeed::routeEvent(const std::string& payload) {
 
     if (event == "order_created") {
         order.type = OrderEventType::New;
-        spdlog::info("NEW    id={} side={} px={} amt={}", id, side, price, amount);
     } else if (event == "order_changed") {
         order.type = OrderEventType::Modify;
-        spdlog::info("MODIFY id={} side={} px={} amt={}", id, side, price, amount);
     } else { // order_deleted
         order.type = OrderEventType::Cancel;
-        spdlog::info("CANCEL id={} side={} px={} amt={}", id, side, price, amount);
     }
 
     if (orderHandler_) {

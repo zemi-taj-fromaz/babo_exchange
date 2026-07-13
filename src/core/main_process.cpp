@@ -3,8 +3,13 @@
 #include "core/logging.hpp"
 #include "feed/bitstamp_ws.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
 #include <utility>
 
 namespace babo {
@@ -28,6 +33,23 @@ std::uint64_t toTicks(double price) {
 std::uint64_t toLots(double size) {
     const double qty = size * kQtyScale;
     return qty < 1.0 ? 0 : static_cast<std::uint64_t>(qty + 0.5);
+}
+
+double toDisplayPrice(std::uint64_t price_ticks) {
+    return static_cast<double>(price_ticks) / kPriceScale;
+}
+
+double toDisplayQty(std::uint64_t qty_lots) {
+    return static_cast<double>(qty_lots) / kQtyScale;
+}
+
+std::string bar(std::uint64_t qty, std::uint64_t max_qty) {
+    if (qty == 0 || max_qty == 0) {
+        return {};
+    }
+    const auto width = static_cast<std::size_t>(
+        std::max<std::uint64_t>(1, (qty * 28) / max_qty));
+    return std::string(width, '#');
 }
 } // namespace
 
@@ -119,11 +141,7 @@ void MainProcess::applyOrderEvent(const feed::OrderEvent& event) {
 
         simple::SimpleOrder order(event.side == 'B', price_ticks, qty_lots);
         order.order_id_ = event.order_id;
-        if (order.is_buy()) {
-            book_.bids().insert(order);
-        } else {
-            book_.asks().insert(order);
-        }
+        book_.add(order);
         break;
     }
     case feed::OrderEventType::Modify: {
@@ -154,6 +172,63 @@ void MainProcess::applyOrderEvent(const feed::OrderEvent& event) {
     case feed::OrderEventType::Match:
         break;
     }
+}
+
+void MainProcess::renderDepth(std::uint64_t appliedEvents) {
+    auto& depth = book_.depth();
+    const auto* bids = depth.bids();
+    const auto* asks = depth.asks();
+
+    std::uint64_t max_qty = 0;
+    for (int i = 0; i < 5; ++i) {
+        max_qty = std::max(max_qty, bids[i].aggregate_qty());
+        max_qty = std::max(max_qty, asks[i].aggregate_qty());
+    }
+
+    std::ostringstream out;
+    out << "\x1b[2J\x1b[H";
+    out << "babo_exchange BTC/USD depth"
+        << " | applied events: " << appliedEvents << "\n";
+    if (bids[0].price() != book::INVALID_LEVEL_PRICE &&
+        asks[0].price() != book::INVALID_LEVEL_PRICE &&
+        bids[0].price() >= asks[0].price()) {
+        out << "WARNING: crossed book detected"
+            << " best_bid=" << std::fixed << std::setprecision(2)
+            << toDisplayPrice(bids[0].price())
+            << " best_ask=" << toDisplayPrice(asks[0].price()) << "\n";
+    }
+    out << "---------------------------------------------------------------\n";
+    out << " side        price          qty      orders  depth\n";
+    out << "---------------------------------------------------------------\n";
+
+    for (int i = 4; i >= 0; --i) {
+        if (asks[i].price() == book::INVALID_LEVEL_PRICE) {
+            continue;
+        }
+        out << " ASK  " << std::setw(12) << std::fixed << std::setprecision(2)
+            << toDisplayPrice(asks[i].price())
+            << "  " << std::setw(11) << std::setprecision(8)
+            << toDisplayQty(asks[i].aggregate_qty())
+            << "  " << std::setw(6) << asks[i].order_count()
+            << "  " << bar(asks[i].aggregate_qty(), max_qty) << "\n";
+    }
+
+    out << "-------------------------- spread -----------------------------\n";
+
+    for (int i = 0; i < 5; ++i) {
+        if (bids[i].price() == book::INVALID_LEVEL_PRICE) {
+            continue;
+        }
+        out << " BID  " << std::setw(12) << std::fixed << std::setprecision(2)
+            << toDisplayPrice(bids[i].price())
+            << "  " << std::setw(11) << std::setprecision(8)
+            << toDisplayQty(bids[i].aggregate_qty())
+            << "  " << std::setw(6) << bids[i].order_count()
+            << "  " << bar(bids[i].aggregate_qty(), max_qty) << "\n";
+    }
+
+    out << "\nCtrl+C to stop\n";
+    std::cout << out.str() << std::flush;
 }
 
 void MainProcess::networkLoop(std::stop_token stopToken) {
@@ -196,7 +271,9 @@ void MainProcess::engineLoop(std::stop_token stopToken) {
     reproduceSnapshotFuture_.get();
     spdlog::info("engineThread: snapshot reproduced - consuming ingress queue");
 
+    std::cout << "\x1b[?25l" << std::flush;
     std::uint64_t applied = 0;
+    auto nextRender = std::chrono::steady_clock::now();
     while (!stopToken.stop_requested()) {
         bool drained = false;
         while (auto* event = ingress_.front()) {
@@ -204,14 +281,18 @@ void MainProcess::engineLoop(std::stop_token stopToken) {
             ingress_.pop();
             drained = true;
             ++applied;
-            if ((applied % 2000) == 0) {
-                spdlog::info("engineThread: applied {} live order events", applied);
-            }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= nextRender) {
+            renderDepth(applied);
+            nextRender = now + std::chrono::milliseconds(33);
         }
         if (!drained) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
+    std::cout << "\x1b[?25h" << std::flush;
     spdlog::info("engineThread: stop requested, exiting");
 }
 

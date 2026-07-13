@@ -22,6 +22,7 @@ class BitstampFeed {
 public:
     using OrderHandler = std::function<void(const OrderEvent&)>;
 
+
     explicit BitstampFeed(std::string pair); // e.g. "btcusd"
     ~BitstampFeed();
 

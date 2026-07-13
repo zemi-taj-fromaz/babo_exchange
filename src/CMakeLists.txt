@@ -3,6 +3,7 @@ add_executable(babo_exchange
     core/logging.cpp
     core/main_process.cpp
     egress/client_order_listener.cpp
+    egress/latest_depth_mailbox.cpp
     feed/bitstamp.cpp
     feed/bitstamp_ws.cpp)
 

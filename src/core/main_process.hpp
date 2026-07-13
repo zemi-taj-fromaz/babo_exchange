@@ -2,6 +2,7 @@
 
 #include "book/matching_book.h"
 #include "egress/client_order_listener.hpp"
+#include "egress/latest_depth_mailbox.hpp"
 #include "feed/bitstamp.hpp"
 #include "feed/order_event.hpp"
 
@@ -38,6 +39,7 @@ public:
 private:
     void networkLoop(std::stop_token stopToken);
     void engineLoop(std::stop_token stopToken);
+    void gatewayLoop(std::stop_token stopToken);
 
     // Engine-thread only: rebuild the book from the L3 snapshot before draining
     // the live events that accumulated in ingress_ while REST was in flight.
@@ -58,9 +60,9 @@ private:
     // the local book reconstruction.
     void applyOrderEvent(const feed::OrderEvent& event);
 
-    // Consumer side: render top-of-book depth from the same engine thread that
-    // owns the book, avoiding cross-thread reads.
-    void renderDepth(std::uint64_t appliedEvents);
+    // Engine-thread only: copy the current top-five book into the latest-value
+    // mailbox. The gateway may skip intermediate versions but never reads book_.
+    void publishDepthSnapshot();
 
     // The network thread publishes the fetched snapshot; the engine thread
     // owns both snapshot reproduction and every subsequent book mutation.
@@ -71,6 +73,7 @@ private:
     // single consumer; the engine-thread listener is the single producer.
     egress::ClientOrderEventQueue clientEgress_;
     egress::ClientOrderListener clientOrderListener_;
+    egress::LatestDepthMailbox depthMailbox_;
 
     // The matching core. After snapshot reproduction completes, only the engine
     // thread mutates it by draining ingress_.
@@ -81,7 +84,9 @@ private:
     rigtorp::SPSCQueue<feed::OrderEvent> ingress_;
 
     // Started in the constructor body, after the listener is registered.
-    // Destruction is reverse order, so network stops before engine.
+    // Declaration order gives reverse shutdown: network -> engine -> gateway,
+    // so consumers remain alive while their producers finish.
+    std::jthread gatewayThread_;
     std::jthread engineThread_;
     std::jthread networkThread_;
 };

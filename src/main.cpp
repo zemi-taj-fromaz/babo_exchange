@@ -27,23 +27,15 @@ int main() {
     std::signal(SIGINT, on_signal);   // Ctrl+C
     std::signal(SIGTERM, on_signal);  // kill / service stop
 
-    // Construct the process: this immediately spawns networkThread. When
-    // `process` goes out of scope at the end of main, its jthread member is
-    // destroyed, which auto-requests stop + joins the thread. No manual stop
-    // token handling needed here.
+    // Construct the process: this starts the network, engine, and gateway
+    // jthreads. Scope exit requests stop and joins them in dependency order.
     babo::MainProcess process;
 
     spdlog::info("running — press Ctrl+C to stop");
 
-    // Perpetual run loop: fetch -> process -> emit -> repeat. Right now it just
-    // ticks on a timer; the real work (feed source -> ingress ring -> matching
-    // -> egress) slots in here later.
-    std::uint64_t tick = 0;
+    // The process owns all worker loops; main only coordinates signal-driven
+    // lifetime.
     while (g_running.load(std::memory_order_relaxed)) {
-        //spdlog::info("tick {}", tick++);
-
-        // Placeholder for real work / pacing. Replace with the feed drain once
-        // the ingress ring exists.
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 

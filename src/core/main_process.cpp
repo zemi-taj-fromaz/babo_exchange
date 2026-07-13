@@ -4,14 +4,9 @@
 #include "core/order_identity.hpp"
 #include "feed/bitstamp_ws.hpp"
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <exception>
-#include <iomanip>
-#include <iostream>
-#include <sstream>
-#include <string>
 #include <utility>
 
 namespace babo {
@@ -20,33 +15,17 @@ MainProcess::MainProcess()
     : snapshotFuture_(snapshotPromise_.get_future()), clientEgress_(1u << 14),
       clientOrderListener_(clientEgress_), ingress_(1u << 16) {
     book_.set_order_listener(&clientOrderListener_);
+    gatewayThread_ =
+        std::jthread([this](std::stop_token st) { gatewayLoop(st); });
     engineThread_ =
         std::jthread([this](std::stop_token st) { engineLoop(st); });
     networkThread_ =
         std::jthread([this](std::stop_token st) { networkLoop(st); });
-    spdlog::info("MainProcess constructed - networkThread + engineThread launched");
+    spdlog::info("MainProcess constructed - network + engine + gateway threads launched");
 }
 
 namespace {
 constexpr double kPriceScale = 100.0;         // USD -> integer cents
-constexpr double kQtyScale = 100'000'000.0;   // BTC -> integer satoshis
-
-double toDisplayPrice(std::uint64_t price_ticks) {
-    return static_cast<double>(price_ticks) / kPriceScale;
-}
-
-double toDisplayQty(std::uint64_t qty_lots) {
-    return static_cast<double>(qty_lots) / kQtyScale;
-}
-
-std::string bar(std::uint64_t qty, std::uint64_t max_qty) {
-    if (qty == 0 || max_qty == 0) {
-        return {};
-    }
-    const auto width = static_cast<std::size_t>(
-        std::max<std::uint64_t>(1, (qty * 28) / max_qty));
-    return std::string(width, '#');
-}
 } // namespace
 
 std::size_t MainProcess::seedSide(const std::vector<feed::RestingOrder>& orders,
@@ -181,61 +160,19 @@ void MainProcess::applyOrderEvent(const feed::OrderEvent& event) {
     }
 }
 
-void MainProcess::renderDepth(std::uint64_t appliedEvents) {
+void MainProcess::publishDepthSnapshot() {
     auto& depth = book_.depth();
     const auto* bids = depth.bids();
     const auto* asks = depth.asks();
 
-    std::uint64_t max_qty = 0;
-    for (int i = 0; i < 5; ++i) {
-        max_qty = std::max(max_qty, bids[i].aggregate_qty());
-        max_qty = std::max(max_qty, asks[i].aggregate_qty());
+    egress::DepthSnapshot snapshot;
+    for (std::size_t i = 0; i < egress::kPublishedDepthLevels; ++i) {
+        snapshot.bids[i] = egress::DepthLevelSnapshot{
+            bids[i].price(), bids[i].aggregate_qty(), bids[i].order_count()};
+        snapshot.asks[i] = egress::DepthLevelSnapshot{
+            asks[i].price(), asks[i].aggregate_qty(), asks[i].order_count()};
     }
-
-    std::ostringstream out;
-    out << "\x1b[2J\x1b[H";
-    out << "babo_exchange BTC/USD depth"
-        << " | applied events: " << appliedEvents << "\n";
-    if (bids[0].price() != book::INVALID_LEVEL_PRICE &&
-        asks[0].price() != book::INVALID_LEVEL_PRICE &&
-        bids[0].price() >= asks[0].price()) {
-        out << "WARNING: crossed book detected"
-            << " best_bid=" << std::fixed << std::setprecision(2)
-            << toDisplayPrice(bids[0].price())
-            << " best_ask=" << toDisplayPrice(asks[0].price()) << "\n";
-    }
-    out << "---------------------------------------------------------------\n";
-    out << " side        price          qty      orders  depth\n";
-    out << "---------------------------------------------------------------\n";
-
-    for (int i = 4; i >= 0; --i) {
-        if (asks[i].price() == book::INVALID_LEVEL_PRICE) {
-            continue;
-        }
-        out << " ASK  " << std::setw(12) << std::fixed << std::setprecision(2)
-            << toDisplayPrice(asks[i].price())
-            << "  " << std::setw(11) << std::setprecision(8)
-            << toDisplayQty(asks[i].aggregate_qty())
-            << "  " << std::setw(6) << asks[i].order_count()
-            << "  " << bar(asks[i].aggregate_qty(), max_qty) << "\n";
-    }
-
-    out << "-------------------------- spread -----------------------------\n";
-
-    for (int i = 0; i < 5; ++i) {
-        if (bids[i].price() == book::INVALID_LEVEL_PRICE) {
-            continue;
-        }
-        out << " BID  " << std::setw(12) << std::fixed << std::setprecision(2)
-            << toDisplayPrice(bids[i].price())
-            << "  " << std::setw(11) << std::setprecision(8)
-            << toDisplayQty(bids[i].aggregate_qty())
-            << "  " << std::setw(6) << bids[i].order_count()
-            << "  " << bar(bids[i].aggregate_qty(), max_qty) << "\n";
-    }
-
-    out << "\nCtrl+C to stop\n";
-    std::cout << out.str() << std::flush;
+    depthMailbox_.publish(snapshot);
 }
 
 void MainProcess::networkLoop(std::stop_token stopToken) {
@@ -297,9 +234,8 @@ void MainProcess::engineLoop(std::stop_token stopToken) {
     }
     spdlog::info("engineThread: snapshot reproduced - consuming ingress queue");
 
-    std::cout << "\x1b[?25l" << std::flush;
     std::uint64_t applied = 0;
-    auto nextRender = std::chrono::steady_clock::now();
+    auto nextDepthPublication = std::chrono::steady_clock::now();
     while (!stopToken.stop_requested()) {
         bool drained = false;
         while (auto* event = ingress_.front()) {
@@ -310,16 +246,65 @@ void MainProcess::engineLoop(std::stop_token stopToken) {
         }
 
         const auto now = std::chrono::steady_clock::now();
-        if (now >= nextRender) {
-            renderDepth(applied);
-            nextRender = now + std::chrono::milliseconds(33);
+        if (now >= nextDepthPublication) {
+            publishDepthSnapshot();
+            nextDepthPublication = now + std::chrono::milliseconds(33);
         }
         if (!drained) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
-    std::cout << "\x1b[?25h" << std::flush;
     spdlog::info("engineThread: stop requested, exiting (applied={})", applied);
+}
+
+void MainProcess::gatewayLoop(std::stop_token stopToken) {
+    spdlog::info("gatewayThread: started");
+
+    constexpr std::size_t kMaxEventsPerIteration = 256;
+    std::uint64_t routedEvents = 0;
+    std::uint64_t depthPublications = 0;
+    std::uint64_t lastDepthVersion = 0;
+    std::uint64_t lastDepthSequence = 0;
+    egress::DepthSnapshot depth;
+
+    while (!stopToken.stop_requested()) {
+        bool didWork = false;
+
+        // TCP sessions are added next. For now this establishes the sole queue
+        // consumer and preserves bounded fairness between private events and
+        // public depth publication.
+        std::size_t drained = 0;
+        while (drained < kMaxEventsPerIteration && clientEgress_.front()) {
+            clientEgress_.pop();
+            ++drained;
+            ++routedEvents;
+            didWork = true;
+        }
+
+        if (depthMailbox_.tryReadNew(lastDepthVersion, depth)) {
+            lastDepthSequence = depth.sequence;
+            ++depthPublications;
+            didWork = true;
+        }
+
+        if (!didWork) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    // Producers have already stopped because of member destruction order.
+    while (clientEgress_.front()) {
+        clientEgress_.pop();
+        ++routedEvents;
+    }
+    if (depthMailbox_.tryReadNew(lastDepthVersion, depth)) {
+        lastDepthSequence = depth.sequence;
+        ++depthPublications;
+    }
+
+    spdlog::info("gatewayThread: stop requested, exiting "
+                 "(client_events={}, depth_publications={}, last_depth_seq={})",
+                 routedEvents, depthPublications, lastDepthSequence);
 }
 
 } // namespace babo

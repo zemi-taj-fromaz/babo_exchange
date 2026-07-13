@@ -29,8 +29,8 @@ namespace babo::book {
 // A single execution: `maker` was resting, `taker` was the incoming aggressor.
 struct trade
 {
-    std::uint32_t maker_id;
-    std::uint32_t taker_id;
+    std::uint64_t maker_id;
+    std::uint64_t taker_id;
     std::uint64_t qty;
     std::uint64_t price;   // executed at the maker's (resting) price
 };
@@ -46,7 +46,7 @@ public:
     using DepthTracker = book::Depth<SIZE>;
 
     // Order events are keyed by order id (the OrderListener template's handle type).
-    using OrderEventListener = book::OrderListener<std::uint32_t>;
+    using OrderEventListener = book::OrderListener<std::uint64_t>;
 
     // --- listener registration ---
     void set_order_listener(OrderEventListener* l)                 noexcept { order_listener_ = l; }
@@ -80,7 +80,7 @@ public:
     }
 
     // Cancel by id (resting book or a parked stop).
-    void cancel(std::uint32_t order_id)
+    void cancel(std::uint64_t order_id)
     {
         bool found = cancel_side(order_id, bids_, /*is_buy=*/true)
                   || cancel_side(order_id, asks_, /*is_buy=*/false);
@@ -107,7 +107,7 @@ public:
     //   - price changed    -> cancel + re-submit (the new price may cross, and a reprice
     //                         legitimately loses time priority).
     // new_price == PRICE_UNCHANGED (0) keeps the current price.
-    void replace(std::uint32_t order_id, std::int64_t size_delta, std::uint64_t new_price)
+    void replace(std::uint64_t order_id, std::int64_t size_delta, std::uint64_t new_price)
     {
         // Locate the resting order and its side (bids_ and asks_ are distinct types -> branch).
         bool is_buy = true;
@@ -275,7 +275,7 @@ private:
             if (maker.all_or_none() && maker.open_qty() > in.open_qty()) { ++it; continue; }
 
             const std::uint64_t qty = (std::min)(in.open_qty(), maker.open_qty());
-            const std::uint32_t id  = maker.order_id_;
+            const std::uint64_t id  = maker.order_id_;
             ++it;                                          // advance before a possible erase
             if (execute_trade(in, maker, qty)) opp.erase(id);
         }
@@ -285,7 +285,7 @@ private:
     template <class OppTree>
     void match_aon_incoming(simple::SimpleOrder& in, OppTree& opp)
     {
-        struct cand { std::uint32_t id; std::uint64_t qty; };
+        struct cand { std::uint64_t id; std::uint64_t qty; };
         std::vector<cand> plan;
         const std::uint64_t needed = in.open_qty();
         std::uint64_t planned = 0;
@@ -318,7 +318,7 @@ private:
     }
 
     template <class SideTree>
-    bool cancel_side(std::uint32_t order_id, SideTree& side, [[maybe_unused]] bool is_buy)
+    bool cancel_side(std::uint64_t order_id, SideTree& side, [[maybe_unused]] bool is_buy)
     {
         simple::SimpleOrder* o = side.find_order(order_id);
         if (!o) return false;
@@ -347,7 +347,7 @@ private:
             for (auto it = stopBids_.orders_begin(); it != stopBids_.orders_end(); )
             {
                 if (it->stop_price() > marketPrice_) break;
-                const std::uint32_t id = it->order_id_;
+                const std::uint64_t id = it->order_id_;
                 simple::SimpleOrder copy = *it;
                 ++it;
                 stopBids_.erase(id);
@@ -356,7 +356,7 @@ private:
             for (auto it = stopAsks_.orders_begin(); it != stopAsks_.orders_end(); )
             {
                 if (it->stop_price() < marketPrice_) break;
-                const std::uint32_t id = it->order_id_;
+                const std::uint64_t id = it->order_id_;
                 simple::SimpleOrder copy = *it;
                 ++it;
                 stopAsks_.erase(id);

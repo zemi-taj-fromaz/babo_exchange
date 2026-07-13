@@ -120,10 +120,10 @@ private:
   uint64_t filled_qty_;
   uint64_t filled_cost_;
   int64_t reserved_;            // quantity tentatively earmarked during AON planning (not yet filled)
-  inline static uint32_t last_order_id_{0};
+  inline static uint64_t last_order_id_{0};
 
 public:
-  uint32_t order_id_;   // non-const so orders are assignable into pin_node slots
+  uint64_t order_id_;   // 64-bit: holds venue order ids directly (e.g. Bitstamp)
 
   // Back-pointer to the owning price level. Travels with the payload on relocation,
   // so a slot's owning level is always node->at(slot)._level (O(1), no lookup).

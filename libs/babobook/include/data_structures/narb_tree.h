@@ -106,7 +106,7 @@ public:
     const_iterator find(std::uint64_t price) const { return const_iterator(find_node(price)); }
 
     // O(1) lookup of a resting order by id (nullptr if not in this tree).
-    [[nodiscard]] simple::SimpleOrder* find_order(std::uint32_t order_id)
+    [[nodiscard]] simple::SimpleOrder* find_order(std::uint64_t order_id)
     {
         auto it = _order_index.find(order_id);
         if (it == _order_index.end()) return nullptr;
@@ -165,7 +165,7 @@ public:
 
     // O(1) cancel by order id: locate the slot, unlink it from the PIN chain, and
     // clean up an emptied node (and, if the level empties, the level).
-    void erase(std::uint32_t order_id);
+    void erase(std::uint64_t order_id);
 
     // Debug/testing: verify the red-black invariants (BST order, root black, no red-red,
     // equal black-height). Returns true if the tree is a valid RB tree.
@@ -197,7 +197,7 @@ private:
     void relocate_tail_to_head(pin_node_t* src, pin_node_t* dst);   // one Push Back hop
 
     // order id -> resting location, for O(1) cancel.
-    std::unordered_map<std::uint32_t, order_loc> _order_index;
+    std::unordered_map<std::uint64_t, order_loc> _order_index;
 
     price_level_descriptor* _best = nullptr;
     price_level_descriptor* _root = nullptr;
@@ -504,7 +504,7 @@ price_level_descriptor* narb_tree<type>::make_level(std::uint64_t price)
 template <order_type type>
 void narb_tree<type>::place_order(price_level_descriptor* level, simple::SimpleOrder& order)
 {
-    const std::uint32_t id  = order.order_id_;    // read before the order is moved into a slot
+    const std::uint64_t id  = order.order_id_;    // read before the order is moved into a slot
     const std::uint64_t  qty = order.open_qty();
     const bool level_was_empty = level->empty();
 
@@ -679,7 +679,7 @@ order_loc narb_tree<type>::global_prev(order_loc loc) const
 }
 
 template <order_type type>
-void narb_tree<type>::erase(std::uint32_t order_id)
+void narb_tree<type>::erase(std::uint64_t order_id)
 {
     auto it = _order_index.find(order_id);
     if (it == _order_index.end()) return;   // unknown / already cancelled

@@ -9,8 +9,8 @@ enum class OrderEventType { New, Modify, Cancel, Match };
 struct OrderEvent {
     OrderEventType type{};
     std::uint64_t order_id{};
-    double price{};
-    double size{};
+    std::uint64_t price_ticks{};
+    std::uint64_t qty_lots{};
     char side{}; // 'B' or 'S'
 };
 

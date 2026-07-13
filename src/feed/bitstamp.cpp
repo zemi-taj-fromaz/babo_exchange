@@ -1,5 +1,7 @@
 #include "feed/bitstamp.hpp"
 
+#include "feed/fixed_point.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <array>
@@ -42,8 +44,10 @@ void parseSide(const nlohmann::json& arr, char side,
     out.reserve(arr.size());
     for (const auto& e : arr) {
         RestingOrder o;
-        o.price = std::stod(e[0].get_ref<const nlohmann::json::string_t&>());
-        o.size = std::stod(e[1].get_ref<const nlohmann::json::string_t&>());
+        o.price_ticks =
+            parsePriceTicks(e[0].get_ref<const nlohmann::json::string_t&>());
+        o.qty_lots =
+            parseQtyLots(e[1].get_ref<const nlohmann::json::string_t&>());
         o.order_id = std::stoull(e[2].get_ref<const nlohmann::json::string_t&>());
         o.side = side;
         out.push_back(std::move(o));

@@ -1,6 +1,7 @@
 #include "feed/bitstamp_ws.hpp"
 
 #include "core/logging.hpp"
+#include "feed/fixed_point.hpp"
 
 #include <ixwebsocket/IXNetSystem.h>
 #include <nlohmann/json.hpp>
@@ -101,8 +102,8 @@ void BitstampFeed::routeEvent(const std::string& payload) {
     OrderEvent order;
     try {
         order.order_id = std::stoull(id);
-        order.price = std::stod(price);
-        order.size = std::stod(amount);
+        order.price_ticks = parsePriceTicks(price);
+        order.qty_lots = parseQtyLots(amount);
     } catch (const std::exception& e) {
         spdlog::warn("bitstamp ws: bad order payload: {}", e.what());
         return;

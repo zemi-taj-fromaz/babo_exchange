@@ -9,7 +9,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <future>
-#include <latch>
 #include <stop_token>
 #include <thread>
 #include <vector>
@@ -39,10 +38,9 @@ private:
     void networkLoop(std::stop_token stopToken);
     void engineLoop(std::stop_token stopToken);
 
-    // Runs asynchronously (immediate std::launch::async) off the network thread:
-    // rebuilds the book from the L3 snapshot. The engine thread blocks on the
-    // resulting future before it starts consuming live order flow.
-    void reproduceSnapshot(feed::L3Snapshot snapshot);
+    // Engine-thread only: rebuild the book from the L3 snapshot before draining
+    // the live events that accumulated in ingress_ while REST was in flight.
+    void reproduceSnapshot(const feed::L3Snapshot& snapshot);
 
     // Insert one side of the snapshot into the book as resting orders (direct
     // tree insert, not add(), so no matching runs; these orders are already
@@ -63,12 +61,10 @@ private:
     // owns the book, avoiding cross-thread reads.
     void renderDepth(std::uint64_t appliedEvents);
 
-    // Snapshot-reproduction future: created in the network thread, consumed
-    // (get()) in the engine thread.
-    std::future<void> reproduceSnapshotFuture_;
-    // Signalled by the network thread once reproduceSnapshotFuture_ has been
-    // assigned, so the engine thread can take it without a data race.
-    std::latch snapshotFuturePublished_{1};
+    // The network thread publishes the fetched snapshot; the engine thread
+    // owns both snapshot reproduction and every subsequent book mutation.
+    std::promise<feed::L3Snapshot> snapshotPromise_;
+    std::future<feed::L3Snapshot> snapshotFuture_;
 
     // The matching core. After snapshot reproduction completes, only the engine
     // thread mutates it by draining ingress_.
@@ -78,10 +74,10 @@ private:
     // Rigtorp internally reserves one slack slot.
     rigtorp::SPSCQueue<feed::OrderEvent> ingress_;
 
-    // Declared last so the latch/future/queue above are fully constructed before
-    // the threads that use them start running.
-    std::jthread networkThread_;
+    // Construct engine first: it waits on snapshotFuture_. Destruction is in
+    // reverse order, so network stops producing before engine stops consuming.
     std::jthread engineThread_;
+    std::jthread networkThread_;
 };
 
 } // namespace babo

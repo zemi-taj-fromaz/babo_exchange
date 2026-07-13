@@ -17,6 +17,14 @@ target_link_libraries(babo_exchange PRIVATE
     babobook
     ixwebsocket)
 
+# Apple currently ships the C++20 stop-token implementation behind libc++'s
+# experimental-library feature gate. Keep using the standard jthread/stop_token
+# API and enable the corresponding headers + runtime only for AppleClang.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    target_compile_options(babo_exchange PRIVATE -fexperimental-library)
+    target_link_options(babo_exchange PRIVATE -fexperimental-library)
+endif()
+
 # On MinGW-style toolchains (llvm-mingw / CLion), statically link the C++ runtime
 # so the exe runs standalone (no libc++/libunwind/winpthread DLLs to ship).
 if(MINGW)

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -15,25 +16,15 @@
 namespace babo {
 
 MainProcess::MainProcess()
-    : ingress_(1u << 16),
-      networkThread_([this](std::stop_token st) { networkLoop(st); }),
-      engineThread_([this](std::stop_token st) { engineLoop(st); }) {
+    : snapshotFuture_(snapshotPromise_.get_future()), ingress_(1u << 16),
+      engineThread_([this](std::stop_token st) { engineLoop(st); }),
+      networkThread_([this](std::stop_token st) { networkLoop(st); }) {
     spdlog::info("MainProcess constructed - networkThread + engineThread launched");
 }
 
 namespace {
 constexpr double kPriceScale = 100.0;         // USD -> integer cents
 constexpr double kQtyScale = 100'000'000.0;   // BTC -> integer satoshis
-
-std::uint64_t toTicks(double price) {
-    const double px = price * kPriceScale;
-    return px < 1.0 ? 0 : static_cast<std::uint64_t>(px + 0.5);
-}
-
-std::uint64_t toLots(double size) {
-    const double qty = size * kQtyScale;
-    return qty < 1.0 ? 0 : static_cast<std::uint64_t>(qty + 0.5);
-}
 
 double toDisplayPrice(std::uint64_t price_ticks) {
     return static_cast<double>(price_ticks) / kPriceScale;
@@ -57,8 +48,8 @@ std::size_t MainProcess::seedSide(const std::vector<feed::RestingOrder>& orders,
                                   bool is_buy, std::size_t& skipped) {
     std::size_t seeded = 0;
     for (const auto& ro : orders) {
-        const auto price_ticks = toTicks(ro.price);
-        const auto qty_lots = toLots(ro.size);
+        const auto price_ticks = ro.price_ticks;
+        const auto qty_lots = ro.qty_lots;
         if (price_ticks == 0 || qty_lots == 0) {
             ++skipped;
             continue;
@@ -76,7 +67,7 @@ std::size_t MainProcess::seedSide(const std::vector<feed::RestingOrder>& orders,
     return seeded;
 }
 
-void MainProcess::reproduceSnapshot(feed::L3Snapshot snapshot) {
+void MainProcess::reproduceSnapshot(const feed::L3Snapshot& snapshot) {
     spdlog::info("reproduceSnapshot: seeding book from L3 snapshot "
                  "microtimestamp={} ({} bids, {} asks)",
                  snapshot.microtimestamp, snapshot.bids.size(),
@@ -125,8 +116,8 @@ void MainProcess::enqueueOrderEvent(const feed::OrderEvent& event) {
 }
 
 void MainProcess::applyOrderEvent(const feed::OrderEvent& event) {
-    const auto price_ticks = toTicks(event.price);
-    const auto qty_lots = toLots(event.size);
+    const auto price_ticks = event.price_ticks;
+    const auto qty_lots = event.qty_lots;
 
     switch (event.type) {
     case feed::OrderEventType::New: {
@@ -234,41 +225,60 @@ void MainProcess::renderDepth(std::uint64_t appliedEvents) {
 void MainProcess::networkLoop(std::stop_token stopToken) {
     spdlog::info("networkThread: started");
 
-    feed::L3Snapshot snapshot;
+    bool snapshotPublished = false;
     try {
-        snapshot = feed::fetchL3Snapshot("btcusd");
+        // The network thread fetches data; the engine thread exclusively owns
+        // reconstruction and every subsequent mutation of the matching book.
+        auto snapshot = feed::fetchL3Snapshot("btcusd");
         spdlog::info("networkThread: fetched L3 snapshot microtimestamp={} "
                      "({} bids, {} asks)",
                      snapshot.microtimestamp, snapshot.bids.size(),
                      snapshot.asks.size());
+        snapshotPromise_.set_value(std::move(snapshot));
+        snapshotPublished = true;
+
+        // Showcase trade-off: live subscription starts after the snapshot, so a
+        // small bootstrap gap is possible. Keeping that limitation explicit
+        // avoids coupling the clean ingress architecture to recovery logic.
+        feed::BitstampFeed liveFeed("btcusd");
+        liveFeed.setOrderHandler(
+            [this](const feed::OrderEvent& event) { enqueueOrderEvent(event); });
+        liveFeed.start();
+
+        while (!stopToken.stop_requested()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        liveFeed.stop();
     } catch (const std::exception& e) {
-        spdlog::error("networkThread: snapshot fetch failed: {}", e.what());
+        if (!snapshotPublished) {
+            snapshotPromise_.set_exception(std::current_exception());
+        }
+        spdlog::error("networkThread: initial synchronization failed: {}", e.what());
+    } catch (...) {
+        if (!snapshotPublished) {
+            snapshotPromise_.set_exception(std::current_exception());
+        }
+        spdlog::error("networkThread: initial synchronization failed");
     }
-
-    reproduceSnapshotFuture_ = std::async(
-        std::launch::async, [this, snapshot = std::move(snapshot)]() mutable {
-            reproduceSnapshot(std::move(snapshot));
-        });
-    snapshotFuturePublished_.count_down();
-
-    feed::BitstampFeed liveFeed("btcusd");
-    liveFeed.setOrderHandler(
-        [this](const feed::OrderEvent& event) { enqueueOrderEvent(event); });
-    liveFeed.start();
-
-    while (!stopToken.stop_requested()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
-
-    liveFeed.stop();
     spdlog::info("networkThread: stop requested, exiting");
 }
 
 void MainProcess::engineLoop(std::stop_token stopToken) {
-    spdlog::info("engineThread: started, waiting for snapshot future");
+    spdlog::info("engineThread: started, waiting for initial snapshot");
 
-    snapshotFuturePublished_.wait();
-    reproduceSnapshotFuture_.get();
+    try {
+        auto snapshot = snapshotFuture_.get();
+        reproduceSnapshot(snapshot);
+    } catch (const std::exception& e) {
+        spdlog::error("engineThread: snapshot reproduction failed: {}", e.what());
+        networkThread_.request_stop();
+        return;
+    } catch (...) {
+        spdlog::error("engineThread: snapshot reproduction failed");
+        networkThread_.request_stop();
+        return;
+    }
     spdlog::info("engineThread: snapshot reproduced - consuming ingress queue");
 
     std::cout << "\x1b[?25l" << std::flush;
@@ -293,7 +303,7 @@ void MainProcess::engineLoop(std::stop_token stopToken) {
         }
     }
     std::cout << "\x1b[?25h" << std::flush;
-    spdlog::info("engineThread: stop requested, exiting");
+    spdlog::info("engineThread: stop requested, exiting (applied={})", applied);
 }
 
 } // namespace babo

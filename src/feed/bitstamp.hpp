@@ -8,8 +8,8 @@ namespace babo::feed {
 
 // One resting order from the L3 snapshot: [price, amount, order_id].
 struct RestingOrder {
-    double price{};
-    double size{};
+    std::uint64_t price_ticks{};
+    std::uint64_t qty_lots{};
     std::uint64_t order_id{}; // Bitstamp order id (integer)
     char side{};              // 'B' (bid) or 'S' (ask)
 };

@@ -505,7 +505,7 @@ template <order_type type>
 void narb_tree<type>::place_order(price_level_descriptor* level, simple::SimpleOrder& order)
 {
     const std::uint32_t id  = order.order_id_;    // read before the order is moved into a slot
-    const uint32_t       qty = order.open_qty();
+    const std::uint64_t  qty = order.open_qty();
     const bool level_was_empty = level->empty();
 
     order_loc loc;

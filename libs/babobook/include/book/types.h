@@ -20,9 +20,9 @@ enum OrderCondition : uint32_t {
   oc_stop = oc_immediate_or_cancel << 1
 };
 
-inline constexpr uint32_t MARKET_ORDER_PRICE{0};
-inline constexpr uint32_t PRICE_UNCHANGED{0};
-inline constexpr int32_t SIZE_UNCHANGED{0};
+inline constexpr uint64_t MARKET_ORDER_PRICE{0};
+inline constexpr uint64_t PRICE_UNCHANGED{0};
+inline constexpr int64_t SIZE_UNCHANGED{0};
 
 }
 #endif // BABOMATCHINGENGINE_TYPES_H

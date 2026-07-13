@@ -32,7 +32,7 @@ struct price_level_descriptor
 
     color _color;
     uint64_t _price;
-    uint32_t _quantity;   // aggregate open qty resting at this level
+    uint64_t _quantity;   // aggregate open qty resting at this level
     uint32_t _count;      // number of resting orders at this level (for O(SIZE) depth walk)
 
     order_loc _head;   // highest-priority (best) order at this level

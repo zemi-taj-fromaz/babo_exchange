@@ -31,7 +31,7 @@ struct trade
 {
     std::uint32_t maker_id;
     std::uint32_t taker_id;
-    std::uint32_t qty;
+    std::uint64_t qty;
     std::uint64_t price;   // executed at the maker's (resting) price
 };
 
@@ -107,7 +107,7 @@ public:
     //   - price changed    -> cancel + re-submit (the new price may cross, and a reprice
     //                         legitimately loses time priority).
     // new_price == PRICE_UNCHANGED (0) keeps the current price.
-    void replace(std::uint32_t order_id, std::int32_t size_delta, std::uint64_t new_price)
+    void replace(std::uint32_t order_id, std::int64_t size_delta, std::uint64_t new_price)
     {
         // Locate the resting order and its side (bids_ and asks_ are distinct types -> branch).
         bool is_buy = true;
@@ -125,20 +125,20 @@ public:
         // --- fast path: size-only change, done in place (time priority retained) ---
         if (!reprice)
         {
-            const std::uint32_t open = o->open_qty();
+            const std::uint64_t open = o->open_qty();
             // A reduction that meets/exceeds the open qty collapses the order -> cancel it.
-            if (size_delta < 0 && static_cast<std::uint32_t>(-size_delta) >= open)
+            if (size_delta < 0 && static_cast<std::uint64_t>(-size_delta) >= open)
             {
                 if (is_buy) bids_.erase(order_id); else asks_.erase(order_id);
             }
             else
             {
                 o->modify(size_delta, book::PRICE_UNCHANGED);   // order_qty_ += size_delta
-                o->_level->_quantity = static_cast<std::uint32_t>(
+                o->_level->_quantity = static_cast<std::uint64_t>(
                     static_cast<std::int64_t>(o->_level->_quantity) + size_delta);
             }
             if (order_listener_)
-                order_listener_->on_replace(order_id, size_delta, static_cast<std::uint32_t>(cur_price));
+                order_listener_->on_replace(order_id, size_delta, cur_price);
             notify();
             return;
         }
@@ -149,7 +149,7 @@ public:
 
         copy.modify(size_delta, new_price);
         if (order_listener_)
-            order_listener_->on_replace(order_id, size_delta, static_cast<std::uint32_t>(copy.price()));
+            order_listener_->on_replace(order_id, size_delta, copy.price());
 
         if (copy.open_qty() == 0) { notify(); return; }   // reduced to nothing -> cancelled
         submit(copy);
@@ -224,7 +224,7 @@ private:
     {
         int i = 0;
         for (auto it = tree.begin(); it != tree.end() && i < SIZE; ++it, ++i)
-            out[i].set(static_cast<std::uint32_t>(it->_price), it->_quantity, it->_count);
+            out[i].set(it->_price, it->_quantity, it->_count);
     }
 #endif
 
@@ -238,10 +238,10 @@ private:
 
     // Execute one fill between the incoming order and a resting maker. Updates depth, market
     // price, trade log, and fires the fill/trade listeners. Returns whether the maker filled.
-    bool execute_trade(simple::SimpleOrder& in, simple::SimpleOrder& maker, std::uint32_t qty)
+    bool execute_trade(simple::SimpleOrder& in, simple::SimpleOrder& maker, std::uint64_t qty)
     {
         const std::uint64_t px   = maker.price();
-        const std::uint32_t cost = qty * static_cast<std::uint32_t>(px);
+        const std::uint64_t cost = qty * px;
         in.fill(qty, cost, 0);
         maker.fill(qty, cost, 0);
         maker._level->_quantity -= qty;
@@ -274,7 +274,7 @@ private:
             if (!crosses(maker, in)) break;
             if (maker.all_or_none() && maker.open_qty() > in.open_qty()) { ++it; continue; }
 
-            const std::uint32_t qty = (std::min)(in.open_qty(), maker.open_qty());
+            const std::uint64_t qty = (std::min)(in.open_qty(), maker.open_qty());
             const std::uint32_t id  = maker.order_id_;
             ++it;                                          // advance before a possible erase
             if (execute_trade(in, maker, qty)) opp.erase(id);
@@ -285,23 +285,23 @@ private:
     template <class OppTree>
     void match_aon_incoming(simple::SimpleOrder& in, OppTree& opp)
     {
-        struct cand { std::uint32_t id; std::uint32_t qty; };
+        struct cand { std::uint32_t id; std::uint64_t qty; };
         std::vector<cand> plan;
-        const std::uint32_t needed = in.open_qty();
-        std::uint32_t planned = 0;
+        const std::uint64_t needed = in.open_qty();
+        std::uint64_t planned = 0;
 
         for (auto it = opp.orders_begin(); it != opp.orders_end() && planned < needed; ++it)
         {
             simple::SimpleOrder& maker = *it;
             if (!crosses(maker, in)) break;
-            const std::uint32_t avail = maker.open_qty();
+            const std::uint64_t avail = maker.open_qty();
             if (maker.all_or_none())
             {
                 if (avail <= needed - planned) { plan.push_back({maker.order_id_, avail}); planned += avail; }
             }
             else
             {
-                const std::uint32_t take = (std::min)(avail, needed - planned);
+                const std::uint64_t take = (std::min)(avail, needed - planned);
                 plan.push_back({maker.order_id_, take});
                 planned += take;
             }

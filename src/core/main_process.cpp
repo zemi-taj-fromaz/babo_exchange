@@ -13,24 +13,71 @@ MainProcess::MainProcess()
     spdlog::info("MainProcess constructed — networkThread + engineThread launched");
 }
 
+namespace {
+// Scale factors mapping Coinbase decimals into the engine's integer domain.
+// BTC-USD quotes in $0.01 ticks and trades in 1e-8 (satoshi) base increments.
+// The engine now uses uint64 for price/qty/cost, so satoshis fit with headroom
+// (21M BTC ~= 2.1e15 sat, well under 2^53 double-exact and 2^64).
+constexpr double kPriceScale = 100.0;         // USD -> integer cents
+constexpr double kQtyScale = 100'000'000.0;   // BTC -> integer satoshis
+} // namespace
+
+std::size_t MainProcess::seedSide(const std::vector<feed::RestingOrder>& orders,
+                                  bool is_buy, std::size_t& skipped) {
+    std::size_t seeded = 0;
+    for (const auto& ro : orders) {
+        const double px = ro.price * kPriceScale;
+        const double qty = ro.size * kQtyScale;
+        // Skip only degenerate dust that rounds to a zero price or quantity.
+        if (px < 1.0 || qty < 1.0) {
+            ++skipped;
+            continue;
+        }
+        const auto price_ticks = static_cast<std::uint64_t>(px + 0.5);
+        const auto qty_lots = static_cast<std::uint64_t>(qty + 0.5);
+
+        simple::SimpleOrder order(is_buy, price_ticks, qty_lots);
+        const std::uint32_t engine_id = order.order_id_; // read before the move
+        // Direct resting insert — bypasses matching (snapshot orders don't cross).
+        if (is_buy) {
+            book_.bids().insert(order);
+        } else {
+            book_.asks().insert(order);
+        }
+        orderIdMap_.emplace(ro.order_id, engine_id);
+        ++seeded;
+    }
+    return seeded;
+}
+
 void MainProcess::reproduceSnapshot(feed::L3Snapshot snapshot) {
     spdlog::info("reproduceSnapshot: seeding book from L3 snapshot seq={} "
                  "({} bids, {} asks)",
                  snapshot.sequence, snapshot.bids.size(), snapshot.asks.size());
 
-    // STUB: later, insert each resting order into the book so it is seeded
-    // before live events are applied. For now, log the top of each side so we
-    // can eyeball that the real data came through. Level=3 returns orders in
-    // book/price priority, so the fronts are best bid / best ask.
-    if (!snapshot.bids.empty()) {
-        const auto& b = snapshot.bids.front();
-        spdlog::info("  best bid: px={} sz={} id={}", b.price, b.size,
-                     b.order_id);
+    orderIdMap_.clear();
+    orderIdMap_.reserve(snapshot.bids.size() + snapshot.asks.size());
+
+    std::size_t skipped = 0;
+    const std::size_t seeded_bids = seedSide(snapshot.bids, /*is_buy=*/true, skipped);
+    const std::size_t seeded_asks = seedSide(snapshot.asks, /*is_buy=*/false, skipped);
+
+    spdlog::info("reproduceSnapshot: inserted {} bids + {} asks = {} resting "
+                 "orders ({} skipped, {} id-mapped)",
+                 seeded_bids, seeded_asks, seeded_bids + seeded_asks, skipped,
+                 orderIdMap_.size());
+
+    // Verify by reading the top of book straight from the engine's own trees —
+    // if these match the snapshot's best bid/ask, the book was built correctly.
+    if (auto* bb = book_.bids().get_best()) {
+        spdlog::info("  book best bid: ${:.2f} ({} ticks) qty={} across {} orders",
+                     static_cast<double>(bb->_price) / kPriceScale, bb->_price,
+                     bb->_quantity, bb->_count);
     }
-    if (!snapshot.asks.empty()) {
-        const auto& a = snapshot.asks.front();
-        spdlog::info("  best ask: px={} sz={} id={}", a.price, a.size,
-                     a.order_id);
+    if (auto* ba = book_.asks().get_best()) {
+        spdlog::info("  book best ask: ${:.2f} ({} ticks) qty={} across {} orders",
+                     static_cast<double>(ba->_price) / kPriceScale, ba->_price,
+                     ba->_quantity, ba->_count);
     }
     spdlog::info("reproduceSnapshot: done");
 }
@@ -88,21 +135,8 @@ void MainProcess::networkLoop(std::stop_token stopToken) {
     // 3. Publish the future so the engine thread can consume it race-free.
     snapshotFuturePublished_.count_down();
 
-    // 4. Start queuing (for now: logging) incoming order messages. These sample
-    //    messages STAND IN for parsed Coinbase `full`-channel events — replace
-    //    with the real WebSocket read/parse loop later.
-    const FeedMessage sample[] = {
-        {MsgType::New, 1001, 50000.0, 0.5, 'B'},
-        {MsgType::New, 1002, 50010.0, 0.3, 'S'},
-        {MsgType::Modify, 1001, 50000.0, 0.4, 'B'},
-        {MsgType::Match, 1002, 0.0, 0.0, 'S'}, // discarded (our engine matches)
-        {MsgType::Cancel, 1001, 0.0, 0.0, 'B'},
-    };
-    for (const auto& msg : sample) {
-        handleMessage(msg);
-    }
-
-    // Idle until shutdown — the real WS message read loop lands here.
+    // 4. Idle until shutdown. The real WebSocket read/parse loop lands here:
+    //    each parsed `full`-channel event -> handleMessage() -> ingress ring.
     while (!stopToken.stop_requested()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }

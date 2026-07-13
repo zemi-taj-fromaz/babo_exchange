@@ -8,9 +8,9 @@
 
 namespace babo::book {
 
-inline constexpr const uint32_t INVALID_LEVEL_PRICE(0);
-inline constexpr uint32_t MARKET_ORDER_BID_SORT_PRICE(UINT32_MAX);
-inline constexpr uint32_t MARKET_ORDER_ASK_SORT_PRICE(0);
+inline constexpr const uint64_t INVALID_LEVEL_PRICE(0);
+inline constexpr uint64_t MARKET_ORDER_BID_SORT_PRICE(UINT64_MAX);
+inline constexpr uint64_t MARKET_ORDER_ASK_SORT_PRICE(0);
 
 }
 

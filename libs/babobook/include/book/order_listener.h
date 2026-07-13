@@ -25,8 +25,8 @@ public:
   /// @param fill_cost the cost of this fill (qty * price)
   virtual void on_fill(const OrderPtr& order,
                        const OrderPtr& matched_order,
-                       uint32_t fill_qty,
-                       uint32_t fill_cost) = 0;
+                       uint64_t fill_qty,
+                       uint64_t fill_cost) = 0;
 
   /// @brief callback for an order cancellation
   virtual void on_cancel(const OrderPtr& order) = 0;
@@ -39,8 +39,8 @@ public:
   /// @param size_delta the change to order quantity
   /// @param new_price the updated order price
   virtual void on_replace(const OrderPtr& order,
-                          const int32_t& size_delta,
-                          uint32_t new_price) = 0;
+                          const int64_t& size_delta,
+                          uint64_t new_price) = 0;
 
   /// @brief callback for an order replace rejection
   virtual void on_replace_reject(const OrderPtr& order, const char* reason) = 0;

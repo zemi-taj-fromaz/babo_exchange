@@ -3,11 +3,15 @@
 #include "book/matching_book.h"
 #include "feed/coinbase.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <future>
 #include <latch>
 #include <stop_token>
+#include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 namespace babo {
 
@@ -52,6 +56,13 @@ private:
     // resulting future before it starts consuming live order flow.
     void reproduceSnapshot(feed::L3Snapshot snapshot);
 
+    // Insert one side of the snapshot into the book as resting orders (direct
+    // tree insert — NOT add(), so no matching runs; these orders are already
+    // resting). Returns how many were seeded; bumps `skipped` for orders that
+    // can't be represented in the engine's uint32 price/qty domain.
+    std::size_t seedSide(const std::vector<feed::RestingOrder>& orders,
+                         bool is_buy, std::size_t& skipped);
+
     // Route one inbound message: New/Modify/Cancel are logged (later: enqueued
     // into the ingress ring); Match is discarded (see TODO in the .cpp).
     void handleMessage(const FeedMessage& msg);
@@ -67,6 +78,12 @@ private:
     // snapshot seed + the drained order flow), keeping it lock-free and
     // deterministic. Default SIZE=5 depth levels, TRADE_CAP=256 trade ring.
     book::matching_book<> book_;
+
+    // Coinbase order UUID -> engine order id (assigned at seed/insert time). Lets
+    // later live done/change/match events, which reference the UUID, locate the
+    // resting order in book_. Written during snapshot reproduction; read on the
+    // engine thread when applying live flow.
+    std::unordered_map<std::string, std::uint32_t> orderIdMap_;
 
     // Declared last so the latch/future above are fully constructed before the
     // threads that use them start running.

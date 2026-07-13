@@ -26,9 +26,9 @@ SimpleOrder::SimpleOrder()
 
 SimpleOrder::SimpleOrder(
   bool is_buy,
-  uint32_t price,
-  uint32_t qty,
-  uint32_t stop_price,
+  uint64_t price,
+  uint64_t qty,
+  uint64_t stop_price,
   book::OrderConditions conditions)
 : state_(os_new),
   is_buy_(is_buy),
@@ -61,13 +61,13 @@ SimpleOrder::is_buy() const
   return is_buy_;
 }
 
-uint32_t
+uint64_t
 SimpleOrder::price() const
 {
   return price_;
 }
 
-uint32_t
+uint64_t
 SimpleOrder::stop_price() const
 {
   return stop_price_;
@@ -90,22 +90,22 @@ SimpleOrder::immediate_or_cancel() const
 {
   return (conditions_ & book::OrderCondition::oc_immediate_or_cancel) != 0;
 }
-uint32_t
+uint64_t
 SimpleOrder::order_qty() const
 {
   return order_qty_;
 }
 
-uint32_t
+uint64_t
 SimpleOrder::open_qty() const
 {
   // Remaining quantity, minus any tentatively reserved amount.
   // If not completely filled, calculate
   if (filled_qty_ < order_qty_) {
-    uint32_t remaining = order_qty_ - filled_qty_;
+    uint64_t remaining = order_qty_ - filled_qty_;
     // Subtract the reservation, guarding against going below zero.
-    if (reserved_ > 0 && static_cast<uint32_t>(reserved_) < remaining) {
-      return remaining - static_cast<uint32_t>(reserved_);
+    if (reserved_ > 0 && static_cast<uint64_t>(reserved_) < remaining) {
+      return remaining - static_cast<uint64_t>(reserved_);
     }
     return (reserved_ <= 0) ? remaining : 0;
   // Else prevent accidental overflow
@@ -114,8 +114,8 @@ SimpleOrder::open_qty() const
   }
 }
 
-uint32_t
-SimpleOrder::reserve(int32_t reserved)
+uint64_t
+SimpleOrder::reserve(int64_t reserved)
 {
   reserved_ += reserved;
   return open_qty();
@@ -128,29 +128,29 @@ SimpleOrder::filled() const
 }
 
 void
-SimpleOrder::change_qty(int32_t delta)
+SimpleOrder::change_qty(int64_t delta)
 {
-  if (delta < 0 && static_cast<int32_t>(open_qty()) < -delta) {
+  if (delta < 0 && static_cast<int64_t>(open_qty()) < -delta) {
     throw std::runtime_error("Replace size reduction larger than open quantity");
   }
   order_qty_ += delta;
 }
 
-const uint32_t&
+const uint64_t&
 SimpleOrder::filled_qty() const
 {
   return filled_qty_;
 }
 
-const uint32_t&
+const uint64_t&
 SimpleOrder::filled_cost() const
 {
   return filled_cost_;
 }
 
 void
-SimpleOrder::fill(uint32_t fill_qty,
-                  uint32_t fill_cost,
+SimpleOrder::fill(uint64_t fill_qty,
+                  uint64_t fill_cost,
                   uint32_t /*fill_id*/)
 {
   filled_qty_ += fill_qty;
@@ -177,7 +177,7 @@ SimpleOrder::cancel()
 }
 
 void
-SimpleOrder::replace(uint32_t size_delta, uint32_t new_price)
+SimpleOrder::replace(uint64_t size_delta, uint64_t new_price)
 {
   if (os_accepted == state_) {
     order_qty_ += size_delta;
@@ -186,11 +186,11 @@ SimpleOrder::replace(uint32_t size_delta, uint32_t new_price)
 }
 
 void
-SimpleOrder::modify(int32_t size_delta, uint64_t new_price)
+SimpleOrder::modify(int64_t size_delta, uint64_t new_price)
 {
-  order_qty_ = static_cast<uint32_t>(static_cast<int32_t>(order_qty_) + size_delta);
+  order_qty_ = static_cast<uint64_t>(static_cast<int64_t>(order_qty_) + size_delta);
   if (new_price != 0 /* PRICE_UNCHANGED */) {
-    price_ = static_cast<uint32_t>(new_price);
+    price_ = new_price;
   }
 }
 

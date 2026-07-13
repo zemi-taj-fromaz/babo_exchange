@@ -1,5 +1,8 @@
 #pragma once
 
+#include "book/matching_book.h"
+#include "feed/coinbase.hpp"
+
 #include <cstdint>
 #include <future>
 #include <latch>
@@ -7,14 +10,6 @@
 #include <thread>
 
 namespace babo {
-
-// Placeholder for the REST L3 snapshot payload. Later: the parsed
-// [price, size, order_id] resting orders from
-// GET .../products/BTC-USD/book?level=3, used to seed the book before live
-// events are consumed.
-struct SnapshotData {
-    // stub — no fields yet
-};
 
 // A normalized inbound feed message. Later this is what the Coinbase
 // LiveSocketSource produces (received -> New, change -> Modify, done/canceled ->
@@ -55,7 +50,7 @@ private:
     // Runs asynchronously (immediate std::launch::async) off the network thread:
     // rebuilds the book from the L3 snapshot. The engine thread blocks on the
     // resulting future before it starts consuming live order flow.
-    void reproduceSnapshot(SnapshotData snapshot);
+    void reproduceSnapshot(feed::L3Snapshot snapshot);
 
     // Route one inbound message: New/Modify/Cancel are logged (later: enqueued
     // into the ingress ring); Match is discarded (see TODO in the .cpp).
@@ -67,6 +62,11 @@ private:
     // Signalled by the network thread once reproduceSnapshotFuture_ has been
     // assigned, so the engine thread can take it without a data race.
     std::latch snapshotFuturePublished_{1};
+
+    // The matching core. Single-writer: only the engine thread touches it (the
+    // snapshot seed + the drained order flow), keeping it lock-free and
+    // deterministic. Default SIZE=5 depth levels, TRADE_CAP=256 trade ring.
+    book::matching_book<> book_;
 
     // Declared last so the latch/future above are fully constructed before the
     // threads that use them start running.

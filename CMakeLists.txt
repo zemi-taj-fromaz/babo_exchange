@@ -25,4 +25,19 @@ FetchContent_Declare(spdlog
     GIT_SHALLOW    TRUE)
 FetchContent_MakeAvailable(spdlog)
 
+# ---- nlohmann/json ---------------------------------------------------------
+# Header-only JSON, used to parse the Coinbase REST L3 snapshot (bootstrap, not
+# hot path — ergonomics over raw parse speed here).
+FetchContent_Declare(nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE)
+FetchContent_MakeAvailable(nlohmann_json)
+
+# ---- babobook (the matching core) ------------------------------------------
+# Vendored copy of the matching-engine library. Multiplatform, network-agnostic,
+# header-only + one .cpp; exposes babo::book::matching_book. This is the core we
+# wrap; the exchange is the system around it.
+add_subdirectory(libs/babobook)
+
 add_subdirectory(src)

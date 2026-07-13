@@ -13,11 +13,25 @@ MainProcess::MainProcess()
     spdlog::info("MainProcess constructed — networkThread + engineThread launched");
 }
 
-void MainProcess::reproduceSnapshot(SnapshotData /*snapshot*/) {
-    spdlog::info("reproduceSnapshot: rebuilding book from L3 snapshot (stub)");
-    // STUB: later, insert each resting [price, size, order_id] order from the
-    // snapshot into the book so it is seeded before live events are applied.
-    std::this_thread::sleep_for(std::chrono::milliseconds(500)); // simulate work
+void MainProcess::reproduceSnapshot(feed::L3Snapshot snapshot) {
+    spdlog::info("reproduceSnapshot: seeding book from L3 snapshot seq={} "
+                 "({} bids, {} asks)",
+                 snapshot.sequence, snapshot.bids.size(), snapshot.asks.size());
+
+    // STUB: later, insert each resting order into the book so it is seeded
+    // before live events are applied. For now, log the top of each side so we
+    // can eyeball that the real data came through. Level=3 returns orders in
+    // book/price priority, so the fronts are best bid / best ask.
+    if (!snapshot.bids.empty()) {
+        const auto& b = snapshot.bids.front();
+        spdlog::info("  best bid: px={} sz={} id={}", b.price, b.size,
+                     b.order_id);
+    }
+    if (!snapshot.asks.empty()) {
+        const auto& a = snapshot.asks.front();
+        spdlog::info("  best ask: px={} sz={} id={}", a.price, a.size,
+                     a.order_id);
+    }
     spdlog::info("reproduceSnapshot: done");
 }
 
@@ -49,10 +63,18 @@ void MainProcess::handleMessage(const FeedMessage& msg) {
 void MainProcess::networkLoop(std::stop_token stopToken) {
     spdlog::info("networkThread: started");
 
-    // 1. Receive the REST L3 snapshot. STUB for now — later this is
-    //    GET https://api.exchange.coinbase.com/products/BTC-USD/book?level=3.
-    SnapshotData snapshot{};
-    spdlog::info("networkThread: received L3 snapshot (stub)");
+    // 1. Fetch the REST L3 snapshot from Coinbase (bootstrap; shells out to
+    //    curl inside fetchL3Snapshot). On failure we proceed with an empty
+    //    snapshot + logged error rather than blocking the engine thread.
+    feed::L3Snapshot snapshot;
+    try {
+        snapshot = feed::fetchL3Snapshot("BTC-USD");
+        spdlog::info("networkThread: fetched L3 snapshot seq={} ({} bids, {} asks)",
+                     snapshot.sequence, snapshot.bids.size(),
+                     snapshot.asks.size());
+    } catch (const std::exception& e) {
+        spdlog::error("networkThread: snapshot fetch failed: {}", e.what());
+    }
 
     // 2. Launch snapshot reproduction IMMEDIATELY on its own thread.
     //    std::launch::async (NOT deferred): deferred would only run when the

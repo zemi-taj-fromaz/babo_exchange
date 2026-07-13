@@ -1,9 +1,9 @@
 //
 // Reworked matching core: the book owns nothing; the narb_trees (global PIN chains)
 // own all resting/parked orders by value. The application interacts purely by order id.
-// Composes a book::Depth<SIZE> aggregate tracker and the full listener set (order / trade /
-// book-change / depth / bbo), matching what SimpleOrderBook/DepthOrderBook exposed -- but
-// id-based (OrderListener is instantiated on the order id, not a pointer).
+// Composes a pull-based book::Depth<SIZE> snapshot and emits canonical order-domain events
+// through one id-based OrderListener. The exchange derives private client notifications from
+// fills and periodically pulls depth for public market-data publication.
 //
 #ifndef BABOMATCHINGENGINE_MATCHING_BOOK_H
 #define BABOMATCHINGENGINE_MATCHING_BOOK_H
@@ -13,49 +13,27 @@
 #include "types.h"
 #include "depth.h"
 #include "order_listener.h"
-#include "trade_listener.h"
-#include "order_book_listener.h"
-#include "depth_listener.h"
-#include "bbo_listener.h"
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
 namespace babo::book {
 
-// A single execution: `maker` was resting, `taker` was the incoming aggressor.
-struct trade
-{
-    std::uint64_t maker_id;
-    std::uint64_t taker_id;
-    std::uint64_t qty;
-    std::uint64_t price;   // executed at the maker's (resting) price
-};
-
-// TRADE_CAP is the depth of the inline trade ring (see trades_available/read_trade below).
-// Must be a power of two so the wrap is a mask, not a divide.
-template <int SIZE = 5, std::size_t TRADE_CAP = 256>
+template <int SIZE = 5>
 class matching_book
 {
-    static_assert((TRADE_CAP & (TRADE_CAP - 1)) == 0 && TRADE_CAP != 0,
-                  "TRADE_CAP must be a non-zero power of two");
 public:
     using DepthTracker = book::Depth<SIZE>;
+    using Fill = book::Fill<std::uint64_t>;
 
     // Order events are keyed by order id (the OrderListener template's handle type).
     using OrderEventListener = book::OrderListener<std::uint64_t>;
 
     // --- listener registration ---
-    void set_order_listener(OrderEventListener* l)                 noexcept { order_listener_ = l; }
-    void set_trade_listener(book::TradeListener<matching_book>* l) noexcept { trade_listener_ = l; }
-    void set_order_book_listener(book::OrderBookListener<matching_book>* l) noexcept { book_listener_ = l; }
-    // NOTE: depth is now PULL-based -- query depth() when you want a snapshot. There is
-    // no per-op depth/bbo push listener; a market-data publisher derives depth off the
-    // hot path from the order-event stream (or by calling depth()), mirroring how real
-    // exchanges separate matching from market-data dissemination.
+    void set_order_listener(OrderEventListener* l) noexcept { order_listener_ = l; }
+    // Depth is pull-based: query depth() when the exchange wants a fresh snapshot.
 
     // Submit an order. Rejected if size is zero; stop orders whose trigger hasn't been reached
     // are parked; otherwise it matches the opposite side (market crosses everything) and any
@@ -76,7 +54,6 @@ public:
             submit(order);                                     // match + rest (moves market via trades)
             process_triggered();                               // resubmit any stops the trades triggered
         }
-        notify();
     }
 
     // Cancel by id (resting book or a parked stop).
@@ -92,7 +69,6 @@ public:
         if (found)
         {
             if (order_listener_) order_listener_->on_cancel(order_id);
-            notify();
         }
         else if (order_listener_)
         {
@@ -139,7 +115,6 @@ public:
             }
             if (order_listener_)
                 order_listener_->on_replace(order_id, size_delta, cur_price);
-            notify();
             return;
         }
 
@@ -151,10 +126,9 @@ public:
         if (order_listener_)
             order_listener_->on_replace(order_id, size_delta, copy.price());
 
-        if (copy.open_qty() == 0) { notify(); return; }   // reduced to nothing -> cancelled
+        if (copy.open_qty() == 0) return;   // reduced to nothing -> cancelled
         submit(copy);
         process_triggered();
-        notify();
     }
 
     // Externally set the market price (e.g. from a reference feed); triggers crossed stops.
@@ -162,20 +136,10 @@ public:
     {
         marketPrice_ = px;
         process_triggered();
-        notify();
     }
 
     [[nodiscard]] std::uint64_t market_price() const noexcept { return marketPrice_; }
 
-    // --- trade feed (inline SPSC ring; no heap, no per-op clear) ---
-    // The engine pushes each execution; the caller drains at its own pace. Unread count is just
-    // (write - read). The ring holds the most recent TRADE_CAP unread trades: if the caller falls
-    // more than TRADE_CAP behind, the oldest unread are overwritten -- the trade listener is the
-    // complete, unbounded feed, this is a convenience poll buffer. Typical use:
-    //     while (book.trades_available()) { const trade& t = book.read_trade(); ... }
-    [[nodiscard]] std::uint64_t trades_available() const noexcept { return trade_w_ - trade_r_; }
-    // Pop the oldest unread trade. Precondition: trades_available() > 0.
-    [[nodiscard]] const trade& read_trade() noexcept { return trade_ring_[trade_r_++ & (TRADE_CAP - 1)]; }
     [[nodiscard]] narb_tree<order_type::BID>& bids() noexcept { return bids_; }
     [[nodiscard]] narb_tree<order_type::ASK>& asks() noexcept { return asks_; }
     // Aggregate top-of-book depth, DERIVED on demand: walk each side's top-SIZE price
@@ -205,14 +169,6 @@ private:
             if (order.is_buy()) bids_.insert(order);
             else                asks_.insert(order);
         }
-        // Publishing happens once per public op in notify().
-    }
-
-    // Fire the per-operation book-change listener. Depth is pull-based (see depth());
-    // nothing is pushed per op -- a market-data layer derives depth off the hot path.
-    void notify()
-    {
-        if (book_listener_) book_listener_->on_order_book_change(this);
     }
 
 #ifndef BABO_NO_DEPTH
@@ -236,8 +192,8 @@ private:
                            : (maker.price() >= in.price());
     }
 
-    // Execute one fill between the incoming order and a resting maker. Updates depth, market
-    // price, trade log, and fires the fill/trade listeners. Returns whether the maker filled.
+    // Execute one fill between the incoming order and a resting maker. Updates the orders and
+    // market price, then emits the canonical fill event. Returns whether the maker filled.
     bool execute_trade(simple::SimpleOrder& in, simple::SimpleOrder& maker, std::uint64_t qty)
     {
         const std::uint64_t px   = maker.price();
@@ -246,13 +202,10 @@ private:
         maker.fill(qty, cost, 0);
         maker._level->_quantity -= qty;
         const bool maker_filled = (maker.open_qty() == 0);
-        trade_ring_[trade_w_ & (TRADE_CAP - 1)] = {maker.order_id_, in.order_id_, qty, px};
-        ++trade_w_;
-        if (trade_w_ - trade_r_ > TRADE_CAP) ++trade_r_;   // consumer fell behind: drop the oldest unread
         marketPrice_ = px;
 
-        if (order_listener_) order_listener_->on_fill(in.order_id_, maker.order_id_, qty, cost);
-        if (trade_listener_) trade_listener_->on_trade(this, qty, cost);
+        if (order_listener_)
+            order_listener_->on_fill(Fill{maker.order_id_, in.order_id_, qty, px});
         return maker_filled;
     }
 
@@ -375,13 +328,7 @@ private:
     book::Depth<SIZE> depth_;              // top-of-book snapshot, rebuilt on depth() (pull-based)
 #endif
 
-    OrderEventListener*                    order_listener_ = nullptr;
-    book::TradeListener<matching_book>*    trade_listener_ = nullptr;
-    book::OrderBookListener<matching_book>* book_listener_ = nullptr;
-
-    std::array<trade, TRADE_CAP> trade_ring_;  // inline; no heap
-    std::uint64_t trade_w_ = 0;            // monotonic write cursor (total trades ever executed)
-    std::uint64_t trade_r_ = 0;            // monotonic read  cursor (caller-advanced)
+    OrderEventListener* order_listener_ = nullptr;
     std::uint64_t marketPrice_ = 0;        // last trade / externally set reference price
 };
 

@@ -79,11 +79,11 @@ private:
     // deterministic. Default SIZE=5 depth levels, TRADE_CAP=256 trade ring.
     book::matching_book<> book_;
 
-    // Coinbase order UUID -> engine order id (assigned at seed/insert time). Lets
-    // later live done/change/match events, which reference the UUID, locate the
-    // resting order in book_. Written during snapshot reproduction; read on the
-    // engine thread when applying live flow.
-    std::unordered_map<std::string, std::uint32_t> orderIdMap_;
+    // Coinbase order UUID (128-bit) -> engine order id (assigned at seed/insert
+    // time). Lets later live done/change/match events, which reference the UUID,
+    // locate the resting order in book_. Written during snapshot reproduction;
+    // read on the engine thread when applying live flow.
+    std::unordered_map<feed::Uuid, std::uint32_t> orderIdMap_;
 
     // Declared last so the latch/future above are fully constructed before the
     // threads that use them start running.

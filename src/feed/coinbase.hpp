@@ -1,17 +1,34 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace babo::feed {
+
+// A 128-bit order identifier (a Coinbase order UUID), stored as two 64-bit
+// halves. It's a trivially-copyable 16-byte POD: no heap, a two-word compare,
+// and a cheap hash — far leaner than keying maps on a std::string. (Portable
+// stand-in for a 128-bit int, which isn't available on MSVC.)
+struct Uuid {
+    std::uint64_t hi{};
+    std::uint64_t lo{};
+    friend bool operator==(const Uuid&, const Uuid&) = default;
+};
+
+// Parse the canonical Coinbase UUID text ("7b3741ab-8b6a-4c9a-8a53-a7bf8d0627d4")
+// into a Uuid: dashes ignored, expects exactly 32 hex digits. Throws
+// std::invalid_argument on malformed input.
+Uuid parseUuid(std::string_view s);
 
 // One resting order from the L3 snapshot: [price, size, order_id].
 struct RestingOrder {
     double price{};
     double size{};
-    std::string order_id; // Coinbase order UUID
-    char side{};          // 'B' (bid) or 'S' (ask)
+    Uuid order_id;  // Coinbase order UUID, as 128 bits
+    char side{};    // 'B' (bid) or 'S' (ask)
 };
 
 // Parsed Coinbase Exchange REST L3 order-book snapshot. `sequence` is the sync
@@ -35,3 +52,13 @@ struct L3Snapshot {
 L3Snapshot fetchL3Snapshot(const std::string& product);
 
 } // namespace babo::feed
+
+// Hash so Uuid can key an unordered_map/set (boost-style combine of the halves).
+template <>
+struct std::hash<babo::feed::Uuid> {
+    std::size_t operator()(const babo::feed::Uuid& u) const noexcept {
+        std::uint64_t h = u.hi;
+        h ^= u.lo + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        return static_cast<std::size_t>(h);
+    }
+};

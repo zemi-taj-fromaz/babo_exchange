@@ -44,13 +44,44 @@ void parseSide(const nlohmann::json& arr, char side,
         RestingOrder o;
         o.price = std::stod(e[0].get_ref<const nlohmann::json::string_t&>());
         o.size = std::stod(e[1].get_ref<const nlohmann::json::string_t&>());
-        o.order_id = e[2].get<std::string>();
+        o.order_id = parseUuid(e[2].get_ref<const nlohmann::json::string_t&>());
         o.side = side;
         out.push_back(std::move(o));
     }
 }
 
 } // namespace
+
+Uuid parseUuid(std::string_view s) {
+    Uuid out{};
+    int nibbles = 0;
+    for (const char c : s) {
+        if (c == '-') {
+            continue; // dashes are cosmetic separators
+        }
+        std::uint64_t v;
+        if (c >= '0' && c <= '9') {
+            v = static_cast<std::uint64_t>(c - '0');
+        } else if (c >= 'a' && c <= 'f') {
+            v = static_cast<std::uint64_t>(c - 'a' + 10);
+        } else if (c >= 'A' && c <= 'F') {
+            v = static_cast<std::uint64_t>(c - 'A' + 10);
+        } else {
+            throw std::invalid_argument("parseUuid: non-hex character");
+        }
+        // First 16 hex digits -> high 64 bits, next 16 -> low 64 bits.
+        if (nibbles < 16) {
+            out.hi = (out.hi << 4) | v;
+        } else {
+            out.lo = (out.lo << 4) | v;
+        }
+        ++nibbles;
+    }
+    if (nibbles != 32) {
+        throw std::invalid_argument("parseUuid: expected 32 hex digits");
+    }
+    return out;
+}
 
 L3Snapshot fetchL3Snapshot(const std::string& product) {
     const std::string url = "https://api.exchange.coinbase.com/products/" +

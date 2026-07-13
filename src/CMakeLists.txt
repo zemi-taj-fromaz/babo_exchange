@@ -2,6 +2,7 @@ add_executable(babo_exchange
     main.cpp
     core/logging.cpp
     core/main_process.cpp
+    egress/client_order_listener.cpp
     feed/bitstamp.cpp
     feed/bitstamp_ws.cpp)
 

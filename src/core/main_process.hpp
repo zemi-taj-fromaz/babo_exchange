@@ -1,6 +1,7 @@
 #pragma once
 
 #include "book/matching_book.h"
+#include "egress/client_order_listener.hpp"
 #include "feed/bitstamp.hpp"
 #include "feed/order_event.hpp"
 
@@ -66,6 +67,11 @@ private:
     std::promise<feed::L3Snapshot> snapshotPromise_;
     std::future<feed::L3Snapshot> snapshotFuture_;
 
+    // Ordered private client notifications. The future publisher thread is the
+    // single consumer; the engine-thread listener is the single producer.
+    egress::ClientOrderEventQueue clientEgress_;
+    egress::ClientOrderListener clientOrderListener_;
+
     // The matching core. After snapshot reproduction completes, only the engine
     // thread mutates it by draining ingress_.
     book::matching_book<> book_;
@@ -74,8 +80,8 @@ private:
     // Rigtorp internally reserves one slack slot.
     rigtorp::SPSCQueue<feed::OrderEvent> ingress_;
 
-    // Construct engine first: it waits on snapshotFuture_. Destruction is in
-    // reverse order, so network stops producing before engine stops consuming.
+    // Started in the constructor body, after the listener is registered.
+    // Destruction is reverse order, so network stops before engine.
     std::jthread engineThread_;
     std::jthread networkThread_;
 };

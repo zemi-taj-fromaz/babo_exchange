@@ -1,6 +1,7 @@
 #include "core/main_process.hpp"
 
 #include "core/logging.hpp"
+#include "core/order_identity.hpp"
 #include "feed/bitstamp_ws.hpp"
 
 #include <algorithm>
@@ -16,9 +17,13 @@
 namespace babo {
 
 MainProcess::MainProcess()
-    : snapshotFuture_(snapshotPromise_.get_future()), ingress_(1u << 16),
-      engineThread_([this](std::stop_token st) { engineLoop(st); }),
-      networkThread_([this](std::stop_token st) { networkLoop(st); }) {
+    : snapshotFuture_(snapshotPromise_.get_future()), clientEgress_(1u << 14),
+      clientOrderListener_(clientEgress_), ingress_(1u << 16) {
+    book_.set_order_listener(&clientOrderListener_);
+    engineThread_ =
+        std::jthread([this](std::stop_token st) { engineLoop(st); });
+    networkThread_ =
+        std::jthread([this](std::stop_token st) { networkLoop(st); });
     spdlog::info("MainProcess constructed - networkThread + engineThread launched");
 }
 
@@ -48,6 +53,12 @@ std::size_t MainProcess::seedSide(const std::vector<feed::RestingOrder>& orders,
                                   bool is_buy, std::size_t& skipped) {
     std::size_t seeded = 0;
     for (const auto& ro : orders) {
+        if (!core::isBitstampOrderId(ro.order_id)) {
+            spdlog::warn("snapshot: Bitstamp id uses reserved client namespace: {}",
+                         ro.order_id);
+            ++skipped;
+            continue;
+        }
         const auto price_ticks = ro.price_ticks;
         const auto qty_lots = ro.qty_lots;
         if (price_ticks == 0 || qty_lots == 0) {
@@ -116,6 +127,11 @@ void MainProcess::enqueueOrderEvent(const feed::OrderEvent& event) {
 }
 
 void MainProcess::applyOrderEvent(const feed::OrderEvent& event) {
+    if (!core::isBitstampOrderId(event.order_id)) {
+        spdlog::warn("engine: Bitstamp id uses reserved client namespace: {}",
+                     event.order_id);
+        return;
+    }
     const auto price_ticks = event.price_ticks;
     const auto qty_lots = event.qty_lots;
 

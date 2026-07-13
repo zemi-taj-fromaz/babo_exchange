@@ -1,6 +1,6 @@
 #include "core/logging.hpp"
 
-#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/sinks/basic_file_sink.h>
 
 #include <atomic>
 
@@ -16,11 +16,14 @@ void init(spdlog::level::level_enum level) {
         return; // already initialized
     }
 
-    auto logger = spdlog::stdout_color_mt("babo");
+    // File sink keeps the terminal clean. spdlog creates the logs/ directory if
+    // it doesn't exist. `true` = truncate on each run (drop for append).
+    auto logger = spdlog::basic_logger_mt("babo", "logs/babo.log", true);
 
     // [time] [level] [thread] message  — thread id matters here because the
-    // whole design is multi-threaded (feed / matching / egress).
-    logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [t:%t] %v");
+    // whole design is multi-threaded (feed / matching / egress). No color codes
+    // in a file sink.
+    logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [t:%t] %v");
     logger->set_level(level);
     logger->flush_on(spdlog::level::warn);
 

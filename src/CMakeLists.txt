@@ -1,6 +1,7 @@
 add_executable(babo_exchange
     main.cpp
-    core/logging.cpp)
+    core/logging.cpp
+    core/main_process.cpp)
 
 target_compile_features(babo_exchange PRIVATE cxx_std_20)
 

@@ -1,6 +1,10 @@
 # Build output
 /build/
 
+# Runtime logs
+logs/
+*.log
+
 # CMake
 CMakeCache.txt
 CMakeFiles/

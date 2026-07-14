@@ -28,6 +28,12 @@ public:
                           std::uint64_t priceTicks,
                           std::uint64_t qtyLots);
 
+    [[nodiscard]] bool ownsClientOrder(core::ExchangeOrderId exchangeOrderId,
+                                       core::SessionId sessionId) const noexcept;
+    void emitCancelRejected(core::SessionId sessionId,
+                            core::ExchangeOrderId exchangeOrderId,
+                            RejectReason reason);
+
     void on_accept(const std::uint64_t& orderId) override;
     void on_reject(const std::uint64_t& orderId, const char* reason) override;
     void on_fill(const book::Fill<std::uint64_t>& fill) override;

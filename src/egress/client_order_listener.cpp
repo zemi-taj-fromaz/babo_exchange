@@ -22,6 +22,24 @@ bool ClientOrderListener::trackClientOrder(
         .second;
 }
 
+bool ClientOrderListener::ownsClientOrder(
+    core::ExchangeOrderId exchangeOrderId,
+    core::SessionId sessionId) const noexcept {
+    const auto it = client_orders_.find(exchangeOrderId);
+    return it != client_orders_.end() && it->second.session_id == sessionId;
+}
+
+void ClientOrderListener::emitCancelRejected(
+    core::SessionId sessionId, core::ExchangeOrderId exchangeOrderId,
+    RejectReason reason) {
+    ClientOrderState state;
+    state.session_id = sessionId;
+    auto event =
+        makeEvent(ClientOrderEventType::CancelRejected, exchangeOrderId, state);
+    event.reject_reason = reason;
+    events_.push(event);
+}
+
 ClientOrderEvent ClientOrderListener::makeEvent(
     ClientOrderEventType type, core::ExchangeOrderId orderId,
     const ClientOrderState& state) {

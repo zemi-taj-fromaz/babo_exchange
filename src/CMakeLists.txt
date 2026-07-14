@@ -4,6 +4,8 @@ add_executable(babo_exchange
     core/main_process.cpp
     egress/client_order_listener.cpp
     egress/latest_depth_mailbox.cpp
+    gateway/socket_poller.cpp
+    gateway/tcp_gateway.cpp
     feed/bitstamp.cpp
     feed/bitstamp_ws.cpp)
 
@@ -17,6 +19,7 @@ target_link_libraries(babo_exchange PRIVATE
     nlohmann_json::nlohmann_json
     MPMCQueue::MPMCQueue
     SPSCQueue::SPSCQueue
+    MPMCQueue::MPMCQueue
     babobook
     ixwebsocket)
 

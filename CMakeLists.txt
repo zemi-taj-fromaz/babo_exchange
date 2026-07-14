@@ -73,5 +73,6 @@ FetchContent_MakeAvailable(ixwebsocket)
 add_subdirectory(libs/babobook)
 add_subdirectory(third_party/rigtorp/MPMCQueue)
 add_subdirectory(third_party/rigtorp/SPSCQueue)
+add_subdirectory(third_party/rigtorp/MPMCQueue)
 
 add_subdirectory(src)

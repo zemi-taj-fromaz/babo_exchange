@@ -3,6 +3,7 @@
 #include "core/logging.hpp"
 #include "core/order_identity.hpp"
 #include "feed/bitstamp_ws.hpp"
+#include "gateway/tcp_gateway.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -22,6 +23,16 @@ MainProcess::MainProcess()
     networkThread_ =
         std::jthread([this](std::stop_token st) { networkLoop(st); });
     spdlog::info("MainProcess constructed - network + engine + gateway threads launched");
+}
+
+MainProcess::~MainProcess() {
+    // Stop both producers first, while the engine consumer is still draining.
+    networkThread_.request_stop();
+    gatewayThread_.request_stop();
+    if (networkThread_.joinable()) networkThread_.join();
+    if (gatewayThread_.joinable()) gatewayThread_.join();
+    engineThread_.request_stop();
+    if (engineThread_.joinable()) engineThread_.join();
 }
 
 namespace {
@@ -101,78 +112,70 @@ void MainProcess::reproduceSnapshot(const feed::L3Snapshot& snapshot) {
     spdlog::info("reproduceSnapshot: done");
 }
 
-void MainProcess::enqueueOrderEvent(const feed::OrderEvent& event) {
+void MainProcess::enqueueFeedEvent(const feed::OrderEvent& event) {
     core::IngressEvent ingressEvent;
-    ingressEvent.source = core::IngressSource::Feed;
-    switch (event.type) {
-    case feed::OrderEventType::New:
-        ingressEvent.type = core::IngressEventType::New;
-        break;
-    case feed::OrderEventType::Modify:
-        ingressEvent.type = core::IngressEventType::Modify;
-        break;
-    case feed::OrderEventType::Cancel:
-        ingressEvent.type = core::IngressEventType::Cancel;
-        break;
-    case feed::OrderEventType::Match:
-        return;
-    }
-    ingressEvent.order_id = event.order_id;
-    ingressEvent.side = event.side;
+    ingressEvent.source = core::IngressSource::Bitstamp;
+    ingressEvent.exchange_order_id = event.order_id;
     ingressEvent.price_ticks = event.price_ticks;
     ingressEvent.qty_lots = event.qty_lots;
-    enqueueIngressEvent(ingressEvent);
+    ingressEvent.side = event.side;
+    switch (event.type) {
+    case feed::OrderEventType::New: ingressEvent.action = core::IngressAction::New; break;
+    case feed::OrderEventType::Modify: ingressEvent.action = core::IngressAction::Modify; break;
+    case feed::OrderEventType::Cancel: ingressEvent.action = core::IngressAction::Cancel; break;
+    case feed::OrderEventType::Match: ingressEvent.action = core::IngressAction::Match; break;
+    }
+    ingress_.push(ingressEvent);
 }
 
-void MainProcess::enqueueIngressEvent(const core::IngressEvent& event) {
-    ingress_.push(event);
+bool MainProcess::tryEnqueueClientEvent(const core::IngressEvent& event) {
+    return ingress_.try_push(event);
 }
 
 void MainProcess::applyIngressEvent(const core::IngressEvent& event) {
-    if (event.source == core::IngressSource::Feed &&
-        !core::isBitstampOrderId(event.order_id)) {
+    if (event.source == core::IngressSource::Client) {
+        applyClientEvent(event);
+    } else {
+        applyFeedEvent(event);
+    }
+}
+
+void MainProcess::applyFeedEvent(const core::IngressEvent& event) {
+    if (!core::isBitstampOrderId(event.exchange_order_id)) {
         spdlog::warn("engine: Bitstamp id uses reserved client namespace: {}",
-                     event.order_id);
+                     event.exchange_order_id);
         return;
     }
     const auto price_ticks = event.price_ticks;
     const auto qty_lots = event.qty_lots;
 
-    switch (event.type) {
-    case core::IngressEventType::New: {
+    switch (event.action) {
+    case core::IngressAction::New: {
         if (price_ticks == 0 || qty_lots == 0) {
             return;
         }
-        if (book_.bids().find_order(event.order_id) ||
-            book_.asks().find_order(event.order_id)) {
-            spdlog::warn("engine: duplicate NEW id={} ignored", event.order_id);
+        if (book_.bids().find_order(event.exchange_order_id) ||
+            book_.asks().find_order(event.exchange_order_id)) {
+            spdlog::warn("engine: duplicate NEW id={} ignored", event.exchange_order_id);
             return;
         }
 
         simple::SimpleOrder order(event.side == 'B', price_ticks, qty_lots);
-        order.order_id_ = event.order_id;
-        if (event.source == core::IngressSource::Client &&
-            !clientOrderListener_.trackClientOrder(
-                event.order_id, event.session_id, event.client_order_id,
-                price_ticks, qty_lots)) {
-            spdlog::warn("engine: rejected invalid client order id={} session={}",
-                         event.order_id, event.session_id);
-            return;
-        }
+        order.order_id_ = event.exchange_order_id;
         book_.add(order);
         break;
     }
-    case core::IngressEventType::Modify: {
-        simple::SimpleOrder* existing = book_.bids().find_order(event.order_id);
+    case core::IngressAction::Modify: {
+        simple::SimpleOrder* existing = book_.bids().find_order(event.exchange_order_id);
         if (!existing) {
-            existing = book_.asks().find_order(event.order_id);
+            existing = book_.asks().find_order(event.exchange_order_id);
         }
         if (!existing) {
-            spdlog::warn("engine: MODIFY unknown id={} ignored", event.order_id);
+            spdlog::warn("engine: MODIFY unknown id={} ignored", event.exchange_order_id);
             return;
         }
         if (qty_lots == 0) {
-            book_.cancel(event.order_id);
+            book_.cancel(event.exchange_order_id);
             return;
         }
 
@@ -181,12 +184,50 @@ void MainProcess::applyIngressEvent(const core::IngressEvent& event) {
         const auto size_delta =
             static_cast<std::int64_t>(qty_lots) -
             static_cast<std::int64_t>(existing->open_qty());
-        book_.replace(event.order_id, size_delta, new_price);
+        book_.replace(event.exchange_order_id, size_delta, new_price);
         break;
     }
-    case core::IngressEventType::Cancel:
-        book_.cancel(event.order_id);
+    case core::IngressAction::Cancel:
+        book_.cancel(event.exchange_order_id);
         break;
+    case core::IngressAction::Match:
+        break;
+    }
+}
+
+void MainProcess::applyClientEvent(const core::IngressEvent& event) {
+    if (event.action == core::IngressAction::New) {
+        if (!core::isClientOrderId(event.exchange_order_id) ||
+            event.session_id == 0 || event.price_ticks == 0 ||
+            event.qty_lots == 0 || (event.side != 'B' && event.side != 'S')) {
+            return;
+        }
+        if (!clientOrderListener_.trackClientOrder(
+                event.exchange_order_id, event.session_id, event.client_order_id,
+                event.price_ticks, event.qty_lots)) {
+            return;
+        }
+        simple::SimpleOrder order(event.side == 'B', event.price_ticks,
+                                  event.qty_lots);
+        order.order_id_ = event.exchange_order_id;
+        book_.add(order);
+        return;
+    }
+    if (event.action == core::IngressAction::Cancel) {
+        if (!core::isClientOrderId(event.exchange_order_id)) {
+            clientOrderListener_.emitCancelRejected(
+                event.session_id, event.exchange_order_id,
+                egress::RejectReason::NotOwner);
+            return;
+        }
+        if (!clientOrderListener_.ownsClientOrder(event.exchange_order_id,
+                                                   event.session_id)) {
+            clientOrderListener_.emitCancelRejected(
+                event.session_id, event.exchange_order_id,
+                egress::RejectReason::NotOwner);
+            return;
+        }
+        book_.cancel(event.exchange_order_id);
     }
 }
 
@@ -225,7 +266,7 @@ void MainProcess::networkLoop(std::stop_token stopToken) {
         // avoids coupling the clean ingress architecture to recovery logic.
         feed::BitstampFeed liveFeed("btcusd");
         liveFeed.setOrderHandler(
-            [this](const feed::OrderEvent& event) { enqueueOrderEvent(event); });
+            [this](const feed::OrderEvent& event) { enqueueFeedEvent(event); });
         liveFeed.start();
 
         while (!stopToken.stop_requested()) {
@@ -270,6 +311,7 @@ void MainProcess::engineLoop(std::stop_token stopToken) {
         bool drained = false;
         core::IngressEvent event;
         while (ingress_.try_pop(event)) {
+            event.sequence = applied + 1;
             applyIngressEvent(event);
             drained = true;
             ++applied;
@@ -297,29 +339,35 @@ void MainProcess::gatewayLoop(std::stop_token stopToken) {
     std::uint64_t lastDepthSequence = 0;
     egress::DepthSnapshot depth;
 
-    while (!stopToken.stop_requested()) {
-        bool didWork = false;
+    try {
+        gateway::TcpGateway gateway(
+            [this](const core::IngressEvent& event) {
+                return tryEnqueueClientEvent(event);
+            });
+
+        while (!stopToken.stop_requested()) {
 
         // TCP sessions are added next. For now this establishes the sole queue
         // consumer and preserves bounded fairness between private events and
         // public depth publication.
         std::size_t drained = 0;
         while (drained < kMaxEventsPerIteration && clientEgress_.front()) {
+            gateway.route(*clientEgress_.front());
             clientEgress_.pop();
             ++drained;
             ++routedEvents;
-            didWork = true;
         }
 
         if (depthMailbox_.tryReadNew(lastDepthVersion, depth)) {
+            gateway.broadcastDepth(depth);
             lastDepthSequence = depth.sequence;
             ++depthPublications;
-            didWork = true;
         }
 
-        if (!didWork) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            gateway.pollOnce(std::chrono::milliseconds(1));
         }
+    } catch (const std::exception& e) {
+        spdlog::error("gatewayThread: fatal error: {}", e.what());
     }
 
     // Producers have already stopped because of member destruction order.

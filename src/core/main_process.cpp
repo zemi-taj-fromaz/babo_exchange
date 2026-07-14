@@ -102,11 +102,35 @@ void MainProcess::reproduceSnapshot(const feed::L3Snapshot& snapshot) {
 }
 
 void MainProcess::enqueueOrderEvent(const feed::OrderEvent& event) {
+    core::IngressEvent ingressEvent;
+    ingressEvent.source = core::IngressSource::Feed;
+    switch (event.type) {
+    case feed::OrderEventType::New:
+        ingressEvent.type = core::IngressEventType::New;
+        break;
+    case feed::OrderEventType::Modify:
+        ingressEvent.type = core::IngressEventType::Modify;
+        break;
+    case feed::OrderEventType::Cancel:
+        ingressEvent.type = core::IngressEventType::Cancel;
+        break;
+    case feed::OrderEventType::Match:
+        return;
+    }
+    ingressEvent.order_id = event.order_id;
+    ingressEvent.side = event.side;
+    ingressEvent.price_ticks = event.price_ticks;
+    ingressEvent.qty_lots = event.qty_lots;
+    enqueueIngressEvent(ingressEvent);
+}
+
+void MainProcess::enqueueIngressEvent(const core::IngressEvent& event) {
     ingress_.push(event);
 }
 
-void MainProcess::applyOrderEvent(const feed::OrderEvent& event) {
-    if (!core::isBitstampOrderId(event.order_id)) {
+void MainProcess::applyIngressEvent(const core::IngressEvent& event) {
+    if (event.source == core::IngressSource::Feed &&
+        !core::isBitstampOrderId(event.order_id)) {
         spdlog::warn("engine: Bitstamp id uses reserved client namespace: {}",
                      event.order_id);
         return;
@@ -115,7 +139,7 @@ void MainProcess::applyOrderEvent(const feed::OrderEvent& event) {
     const auto qty_lots = event.qty_lots;
 
     switch (event.type) {
-    case feed::OrderEventType::New: {
+    case core::IngressEventType::New: {
         if (price_ticks == 0 || qty_lots == 0) {
             return;
         }
@@ -127,10 +151,18 @@ void MainProcess::applyOrderEvent(const feed::OrderEvent& event) {
 
         simple::SimpleOrder order(event.side == 'B', price_ticks, qty_lots);
         order.order_id_ = event.order_id;
+        if (event.source == core::IngressSource::Client &&
+            !clientOrderListener_.trackClientOrder(
+                event.order_id, event.session_id, event.client_order_id,
+                price_ticks, qty_lots)) {
+            spdlog::warn("engine: rejected invalid client order id={} session={}",
+                         event.order_id, event.session_id);
+            return;
+        }
         book_.add(order);
         break;
     }
-    case feed::OrderEventType::Modify: {
+    case core::IngressEventType::Modify: {
         simple::SimpleOrder* existing = book_.bids().find_order(event.order_id);
         if (!existing) {
             existing = book_.asks().find_order(event.order_id);
@@ -152,10 +184,8 @@ void MainProcess::applyOrderEvent(const feed::OrderEvent& event) {
         book_.replace(event.order_id, size_delta, new_price);
         break;
     }
-    case feed::OrderEventType::Cancel:
+    case core::IngressEventType::Cancel:
         book_.cancel(event.order_id);
-        break;
-    case feed::OrderEventType::Match:
         break;
     }
 }
@@ -238,9 +268,9 @@ void MainProcess::engineLoop(std::stop_token stopToken) {
     auto nextDepthPublication = std::chrono::steady_clock::now();
     while (!stopToken.stop_requested()) {
         bool drained = false;
-        feed::OrderEvent event;
+        core::IngressEvent event;
         while (ingress_.try_pop(event)) {
-            applyOrderEvent(event);
+            applyIngressEvent(event);
             drained = true;
             ++applied;
         }

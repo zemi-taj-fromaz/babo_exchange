@@ -1,6 +1,7 @@
 #pragma once
 
 #include "book/matching_book.h"
+#include "core/ingress_event.hpp"
 #include "egress/client_order_listener.hpp"
 #include "egress/latest_depth_mailbox.hpp"
 #include "feed/bitstamp.hpp"
@@ -53,13 +54,17 @@ private:
     std::size_t seedSide(const std::vector<feed::RestingOrder>& orders,
                          bool is_buy, std::size_t& skipped);
 
-    // Producer side: called by the websocket callback thread. It blocks only if
-    // the engine falls behind the fixed-size SPSC queue.
+    // Producer side: called by the websocket callback thread. It converts the
+    // feed-local event into the canonical ingress command envelope.
     void enqueueOrderEvent(const feed::OrderEvent& event);
 
-    // Consumer side: engine thread only. Applies one normalized feed event to
-    // the local book reconstruction.
-    void applyOrderEvent(const feed::OrderEvent& event);
+    // Producer side: used by all ingress producers once they have a canonical
+    // command. Blocks only if the bounded ingress ring is full.
+    void enqueueIngressEvent(const core::IngressEvent& event);
+
+    // Consumer side: engine thread only. Applies one normalized ingress command
+    // to the local book reconstruction.
+    void applyIngressEvent(const core::IngressEvent& event);
 
     // Engine-thread only: copy the current top-five book into the latest-value
     // mailbox. The gateway may skip intermediate versions but never reads book_.
@@ -84,7 +89,7 @@ private:
     // Multiple producers (feed callback, gateway input later), single engine
     // consumer. MPMC is used here because Rigtorp does not expose a separate
     // MPSC queue and the extra consumer capability stays unused.
-    rigtorp::MPMCQueue<feed::OrderEvent> ingress_;
+    rigtorp::MPMCQueue<core::IngressEvent> ingress_;
 
     // Started in the constructor body, after the listener is registered.
     // Declaration order gives reverse shutdown: network -> engine -> gateway,

@@ -238,9 +238,9 @@ void MainProcess::engineLoop(std::stop_token stopToken) {
     auto nextDepthPublication = std::chrono::steady_clock::now();
     while (!stopToken.stop_requested()) {
         bool drained = false;
-        while (auto* event = ingress_.front()) {
-            applyOrderEvent(*event);
-            ingress_.pop();
+        feed::OrderEvent event;
+        while (ingress_.try_pop(event)) {
+            applyOrderEvent(event);
             drained = true;
             ++applied;
         }

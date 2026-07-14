@@ -71,6 +71,7 @@ FetchContent_MakeAvailable(ixwebsocket)
 # header-only + one .cpp; exposes babo::book::matching_book. This is the core we
 # wrap; the exchange is the system around it.
 add_subdirectory(libs/babobook)
+add_subdirectory(third_party/rigtorp/MPMCQueue)
 add_subdirectory(third_party/rigtorp/SPSCQueue)
 
 add_subdirectory(src)

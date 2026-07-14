@@ -15,6 +15,7 @@ target_include_directories(babo_exchange PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(babo_exchange PRIVATE
     spdlog::spdlog
     nlohmann_json::nlohmann_json
+    MPMCQueue::MPMCQueue
     SPSCQueue::SPSCQueue
     babobook
     ixwebsocket)

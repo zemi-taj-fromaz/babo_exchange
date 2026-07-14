@@ -6,6 +6,7 @@
 #include "feed/bitstamp.hpp"
 #include "feed/order_event.hpp"
 
+#include <rigtorp/MPMCQueue.h>
 #include <rigtorp/SPSCQueue.h>
 
 #include <cstddef>
@@ -23,9 +24,9 @@ namespace babo {
 //   - engineThread: waits on snapshot reproduction, then consumes the ingress
 //     queue and drives the matching book.
 //
-// Current ingress is Rigtorp SPSCQueue: one websocket callback producer and one
-// engine consumer. When the order gateway becomes a second producer, this seam
-// is where the planned MPSC ring replaces it.
+// Ingress is a bounded Rigtorp-style MPMC queue. We currently have one producer
+// (the websocket callback), and the order gateway can become a second producer
+// without changing the engine thread's single-consumer ownership of book_.
 class MainProcess {
 public:
     MainProcess();
@@ -69,8 +70,9 @@ private:
     std::promise<feed::L3Snapshot> snapshotPromise_;
     std::future<feed::L3Snapshot> snapshotFuture_;
 
-    // Ordered private client notifications. The future publisher thread is the
-    // single consumer; the engine-thread listener is the single producer.
+    // SPSC egress from the engine thread to the gateway thread. The
+    // engine-thread order listener is the sole producer; gatewayLoop is the sole
+    // consumer that will route these private reports back to client sessions.
     egress::ClientOrderEventQueue clientEgress_;
     egress::ClientOrderListener clientOrderListener_;
     egress::LatestDepthMailbox depthMailbox_;
@@ -79,9 +81,10 @@ private:
     // thread mutates it by draining ingress_.
     book::matching_book<> book_;
 
-    // One live-feed producer, one engine-thread consumer. Capacity is in events;
-    // Rigtorp internally reserves one slack slot.
-    rigtorp::SPSCQueue<feed::OrderEvent> ingress_;
+    // Multiple producers (feed callback, gateway input later), single engine
+    // consumer. MPMC is used here because Rigtorp does not expose a separate
+    // MPSC queue and the extra consumer capability stays unused.
+    rigtorp::MPMCQueue<feed::OrderEvent> ingress_;
 
     // Started in the constructor body, after the listener is registered.
     // Declaration order gives reverse shutdown: network -> engine -> gateway,

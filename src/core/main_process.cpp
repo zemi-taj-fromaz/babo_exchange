@@ -336,7 +336,7 @@ void MainProcess::networkLoop(std::stop_token stopToken) {
         std::vector<feed::OrderEvent> bufferedEvents;
         bufferedEvents.reserve(1u << 14);
         std::mutex bufferedEventsMutex;
-        bool buffering = true;
+        std::atomic_bool buffering{true};
 
         auto subscriptionPromise = std::make_shared<std::promise<void>>();
         auto subscriptionFuture = subscriptionPromise->get_future();
@@ -346,8 +346,13 @@ void MainProcess::networkLoop(std::stop_token stopToken) {
         liveFeed.setOrderHandler(
             [this, &bufferedEvents, &bufferedEventsMutex,
              &buffering](const feed::OrderEvent& event) {
+                if (!buffering.load(std::memory_order_acquire)) {
+                    enqueueFeedEvent(event);
+                    return;
+                }
+
                 std::unique_lock lock(bufferedEventsMutex);
-                if (buffering) {
+                if (buffering.load(std::memory_order_relaxed)) {
                     bufferedEvents.push_back(event);
                     return;
                 }
@@ -363,6 +368,7 @@ void MainProcess::networkLoop(std::stop_token stopToken) {
             });
         liveFeed.start();
 
+        // CONNECTING TO WEBSOCKET
         const auto subscriptionDeadline =
             std::chrono::steady_clock::now() + std::chrono::seconds(10);
         while (!stopToken.stop_requested()) {
@@ -449,7 +455,7 @@ void MainProcess::networkLoop(std::stop_token stopToken) {
                 enqueueFeedEvent(event);
                 ++replayed;
             }
-            buffering = false;
+            buffering.store(false, std::memory_order_release);
         }
         spdlog::info("networkThread: replayed {} buffered live events "
                      "after snapshot ({} skipped as already covered)",

@@ -301,6 +301,25 @@ std::string trim(std::string_view text) {
     return std::string(text.substr(first, last - first + 1));
 }
 
+bool parseDollarNotional(std::string_view text, std::uint64_t& ticks) {
+    const bool prefixed = !text.empty() && text.front() == '$';
+    const bool suffixed = !text.empty() && text.back() == '$';
+    if (prefixed == suffixed) {
+        return false;
+    }
+    if (prefixed) {
+        text.remove_prefix(1);
+    } else {
+        text.remove_suffix(1);
+    }
+    try {
+        ticks = babo::feed::parsePriceTicks(text);
+        return ticks != 0;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 std::string fixedDecimal(std::uint64_t value, std::uint64_t scale,
                          int fractionalDigits) {
     std::ostringstream output;
@@ -559,6 +578,37 @@ int runClient() {
                 }
                 outbound = "sell " + fixedDecimal(qtyLots, kQtyScale, 8);
             }
+        } else if ((verb == "buy" || verb == "sell") &&
+                   parts.size() == 3 &&
+                   (parts[1].starts_with('$') || parts[1].ends_with('$'))) {
+            std::uint64_t notionalTicks = 0;
+            std::uint64_t limitPriceTicks = 0;
+            try {
+                if (!parseDollarNotional(parts[1], notionalTicks)) {
+                    throw std::invalid_argument("notional");
+                }
+                limitPriceTicks = babo::feed::parsePriceTicks(parts[2]);
+            } catch (const std::exception&) {
+                std::scoped_lock lock(stateMutex);
+                state.activity = "Usage: buy|sell <usd$> <limit-price>";
+                return;
+            }
+            if (limitPriceTicks == 0 ||
+                notionalTicks >
+                    std::numeric_limits<std::uint64_t>::max() / kQtyScale) {
+                std::scoped_lock lock(stateMutex);
+                state.activity = "Invalid dollar limit order";
+                return;
+            }
+            const auto qtyLots =
+                notionalTicks * kQtyScale / limitPriceTicks;
+            if (qtyLots == 0) {
+                std::scoped_lock lock(stateMutex);
+                state.activity = "Dollar notional is below one BTC lot";
+                return;
+            }
+            outbound = verb + " " + fixedDecimal(qtyLots, kQtyScale, 8) +
+                       " " + fixedDecimal(limitPriceTicks, 100, 2);
         } else if (verb == "sell" && parts.size() == 2) {
             std::uint64_t usdCents = 0;
             try {
@@ -618,7 +668,7 @@ int runClient() {
     inputOption.on_enter = submitCommand;
     auto commandInput = Input(
         &command,
-        "buy all | sell all | buy 100 | sell 100 | cancel 1",
+        "buy 5000$ 65000 | buy all | sell all | cancel 1",
         inputOption);
     auto submitButton = Button("Submit", submitCommand, ButtonOption::Ascii());
     auto controls = Container::Horizontal({commandInput, submitButton});

@@ -4,20 +4,62 @@
 #include "feed/fixed_point.hpp"
 
 #include <ixwebsocket/IXNetSystem.h>
+#include <ixwebsocket/IXSocketTLSOptions.h>
 #include <nlohmann/json.hpp>
 
+#include <array>
+#include <cstdlib>
+#include <filesystem>
+#include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace babo::feed {
 
 namespace {
 constexpr const char* kUrl = "wss://ws.bitstamp.net";
+
+std::string findCaBundle() {
+#if defined(_WIN32)
+    // IXWebSocket's mbedTLS backend imports the Windows certificate store when
+    // the special SYSTEM value is used.
+    return "SYSTEM";
+#else
+    // mbedTLS cannot query the macOS Keychain or Linux trust store through
+    // IXWebSocket's SYSTEM path. Respect the conventional override first,
+    // then probe common bundle locations used by macOS and Linux distros.
+    if (const char* configured = std::getenv("SSL_CERT_FILE");
+        configured != nullptr && *configured != '\0' &&
+        std::filesystem::is_regular_file(configured)) {
+        return configured;
+    }
+
+    constexpr std::array<std::string_view, 5> candidates{
+        "/etc/ssl/cert.pem",                         // macOS, Alpine
+        "/etc/ssl/certs/ca-certificates.crt",       // Debian, Ubuntu
+        "/etc/pki/tls/certs/ca-bundle.crt",         // Fedora, RHEL
+        "/etc/ssl/ca-bundle.pem",                   // openSUSE
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    };
+    for (const auto candidate : candidates) {
+        if (std::filesystem::is_regular_file(candidate)) {
+            return std::string(candidate);
+        }
+    }
+    throw std::runtime_error(
+        "no TLS CA bundle found; set SSL_CERT_FILE to a PEM bundle");
+#endif
+}
 } // namespace
 
 BitstampFeed::BitstampFeed(std::string pair)
     : pair_(std::move(pair)), channel_("live_orders_" + pair_) {
     ix::initNetSystem(); // WSAStartup on Windows; no-op elsewhere (ref-counted)
     ws_.setUrl(kUrl);
+    ix::SocketTLSOptions tls;
+    tls.caFile = findCaBundle();
+    ws_.setTLSOptions(tls);
+    spdlog::info("bitstamp ws: TLS CA source={}", tls.caFile);
     ws_.setOnMessageCallback(
         [this](const ix::WebSocketMessagePtr& msg) { onMessage(msg); });
 }

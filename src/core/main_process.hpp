@@ -8,8 +8,6 @@
 #include "feed/order_event.hpp"
 
 #include <rigtorp/MPMCQueue.h>
-#include <rigtorp/SPSCQueue.h>
-#include <rigtorp/MPMCQueue.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -26,9 +24,8 @@ namespace babo {
 //   - engineThread: waits on snapshot reproduction, then consumes the ingress
 //     queue and drives the matching book.
 //
-// Ingress is a bounded Rigtorp-style MPMC queue. We currently have one producer
-// (the websocket callback), and the order gateway can become a second producer
-// without changing the engine thread's single-consumer ownership of book_.
+// Ingress is a bounded Rigtorp-style MPMC queue with two producers (live feed
+// and order gateway) and one consumer (the engine thread).
 class MainProcess {
 public:
     MainProcess();
@@ -55,8 +52,7 @@ private:
     std::size_t seedSide(const std::vector<feed::RestingOrder>& orders,
                          bool is_buy, std::size_t& skipped);
 
-    // Producer side: called by the websocket callback thread. It blocks only if
-    // the engine falls behind the fixed-size SPSC queue.
+    // Producer sides of the shared bounded MPSC ingress queue.
     void enqueueFeedEvent(const feed::OrderEvent& event);
     bool tryEnqueueClientEvent(const core::IngressEvent& event);
 
@@ -65,10 +61,6 @@ private:
     void applyIngressEvent(const core::IngressEvent& event);
     void applyFeedEvent(const core::IngressEvent& event);
     void applyClientEvent(const core::IngressEvent& event);
-
-    // Consumer side: engine thread only. Applies one normalized ingress command
-    // to the local book reconstruction.
-    void applyIngressEvent(const core::IngressEvent& event);
 
     // Engine-thread only: copy the current top-five book into the latest-value
     // mailbox. The gateway may skip intermediate versions but never reads book_.
@@ -90,8 +82,7 @@ private:
     // thread mutates it by draining ingress_.
     book::matching_book<> book_;
 
-    // One live-feed producer, one engine-thread consumer. Capacity is in events;
-    // Rigtorp internally reserves one slack slot.
+    // Live-feed + gateway producers, one engine-thread consumer.
     rigtorp::MPMCQueue<core::IngressEvent> ingress_;
 
     // Started in the constructor body, after the listener is registered.

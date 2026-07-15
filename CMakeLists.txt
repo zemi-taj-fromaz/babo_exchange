@@ -66,6 +66,16 @@ FetchContent_Declare(ixwebsocket
     GIT_SHALLOW    TRUE)
 FetchContent_MakeAvailable(ixwebsocket)
 
+# ---- FTXUI (native terminal client) ----------------------------------------
+set(FTXUI_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(FTXUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(FTXUI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(ftxui
+    GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI.git
+    GIT_TAG        v6.1.9
+    GIT_SHALLOW    TRUE)
+FetchContent_MakeAvailable(ftxui)
+
 # ---- babobook (the matching core) ------------------------------------------
 # Vendored copy of the matching-engine library. Multiplatform, network-agnostic,
 # header-only + one .cpp; exposes babo::book::matching_book. This is the core we
@@ -73,6 +83,6 @@ FetchContent_MakeAvailable(ixwebsocket)
 add_subdirectory(libs/babobook)
 add_subdirectory(third_party/rigtorp/MPMCQueue)
 add_subdirectory(third_party/rigtorp/SPSCQueue)
-add_subdirectory(third_party/rigtorp/MPMCQueue)
 
 add_subdirectory(src)
+add_subdirectory(client)

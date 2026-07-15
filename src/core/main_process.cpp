@@ -114,16 +114,16 @@ void MainProcess::reproduceSnapshot(const feed::L3Snapshot& snapshot) {
 
 void MainProcess::enqueueFeedEvent(const feed::OrderEvent& event) {
     core::IngressEvent ingressEvent;
-    ingressEvent.source = core::IngressSource::Bitstamp;
-    ingressEvent.exchange_order_id = event.order_id;
+    ingressEvent.source = core::IngressSource::Feed;
+    ingressEvent.order_id = event.order_id;
     ingressEvent.price_ticks = event.price_ticks;
     ingressEvent.qty_lots = event.qty_lots;
     ingressEvent.side = event.side;
     switch (event.type) {
-    case feed::OrderEventType::New: ingressEvent.action = core::IngressAction::New; break;
-    case feed::OrderEventType::Modify: ingressEvent.action = core::IngressAction::Modify; break;
-    case feed::OrderEventType::Cancel: ingressEvent.action = core::IngressAction::Cancel; break;
-    case feed::OrderEventType::Match: ingressEvent.action = core::IngressAction::Match; break;
+    case feed::OrderEventType::New: ingressEvent.type = core::IngressEventType::New; break;
+    case feed::OrderEventType::Modify: ingressEvent.type = core::IngressEventType::Modify; break;
+    case feed::OrderEventType::Cancel: ingressEvent.type = core::IngressEventType::Cancel; break;
+    case feed::OrderEventType::Match: return;
     }
     ingress_.push(ingressEvent);
 }
@@ -141,41 +141,41 @@ void MainProcess::applyIngressEvent(const core::IngressEvent& event) {
 }
 
 void MainProcess::applyFeedEvent(const core::IngressEvent& event) {
-    if (!core::isBitstampOrderId(event.exchange_order_id)) {
+    if (!core::isBitstampOrderId(event.order_id)) {
         spdlog::warn("engine: Bitstamp id uses reserved client namespace: {}",
-                     event.exchange_order_id);
+                     event.order_id);
         return;
     }
     const auto price_ticks = event.price_ticks;
     const auto qty_lots = event.qty_lots;
 
-    switch (event.action) {
-    case core::IngressAction::New: {
+    switch (event.type) {
+    case core::IngressEventType::New: {
         if (price_ticks == 0 || qty_lots == 0) {
             return;
         }
-        if (book_.bids().find_order(event.exchange_order_id) ||
-            book_.asks().find_order(event.exchange_order_id)) {
-            spdlog::warn("engine: duplicate NEW id={} ignored", event.exchange_order_id);
+        if (book_.bids().find_order(event.order_id) ||
+            book_.asks().find_order(event.order_id)) {
+            spdlog::warn("engine: duplicate NEW id={} ignored", event.order_id);
             return;
         }
 
         simple::SimpleOrder order(event.side == 'B', price_ticks, qty_lots);
-        order.order_id_ = event.exchange_order_id;
+        order.order_id_ = event.order_id;
         book_.add(order);
         break;
     }
-    case core::IngressAction::Modify: {
-        simple::SimpleOrder* existing = book_.bids().find_order(event.exchange_order_id);
+    case core::IngressEventType::Modify: {
+        simple::SimpleOrder* existing = book_.bids().find_order(event.order_id);
         if (!existing) {
-            existing = book_.asks().find_order(event.exchange_order_id);
+            existing = book_.asks().find_order(event.order_id);
         }
         if (!existing) {
-            spdlog::warn("engine: MODIFY unknown id={} ignored", event.exchange_order_id);
+            spdlog::warn("engine: MODIFY unknown id={} ignored", event.order_id);
             return;
         }
         if (qty_lots == 0) {
-            book_.cancel(event.exchange_order_id);
+            book_.cancel(event.order_id);
             return;
         }
 
@@ -184,50 +184,48 @@ void MainProcess::applyFeedEvent(const core::IngressEvent& event) {
         const auto size_delta =
             static_cast<std::int64_t>(qty_lots) -
             static_cast<std::int64_t>(existing->open_qty());
-        book_.replace(event.exchange_order_id, size_delta, new_price);
+        book_.replace(event.order_id, size_delta, new_price);
         break;
     }
-    case core::IngressAction::Cancel:
-        book_.cancel(event.exchange_order_id);
-        break;
-    case core::IngressAction::Match:
+    case core::IngressEventType::Cancel:
+        book_.cancel(event.order_id);
         break;
     }
 }
 
 void MainProcess::applyClientEvent(const core::IngressEvent& event) {
-    if (event.action == core::IngressAction::New) {
-        if (!core::isClientOrderId(event.exchange_order_id) ||
+    if (event.type == core::IngressEventType::New) {
+        if (!core::isClientOrderId(event.order_id) ||
             event.session_id == 0 || event.price_ticks == 0 ||
             event.qty_lots == 0 || (event.side != 'B' && event.side != 'S')) {
             return;
         }
         if (!clientOrderListener_.trackClientOrder(
-                event.exchange_order_id, event.session_id, event.client_order_id,
+                event.order_id, event.session_id, event.client_order_id,
                 event.price_ticks, event.qty_lots)) {
             return;
         }
         simple::SimpleOrder order(event.side == 'B', event.price_ticks,
                                   event.qty_lots);
-        order.order_id_ = event.exchange_order_id;
+        order.order_id_ = event.order_id;
         book_.add(order);
         return;
     }
-    if (event.action == core::IngressAction::Cancel) {
-        if (!core::isClientOrderId(event.exchange_order_id)) {
+    if (event.type == core::IngressEventType::Cancel) {
+        if (!core::isClientOrderId(event.order_id)) {
             clientOrderListener_.emitCancelRejected(
-                event.session_id, event.exchange_order_id,
+                event.session_id, event.order_id,
                 egress::RejectReason::NotOwner);
             return;
         }
-        if (!clientOrderListener_.ownsClientOrder(event.exchange_order_id,
+        if (!clientOrderListener_.ownsClientOrder(event.order_id,
                                                    event.session_id)) {
             clientOrderListener_.emitCancelRejected(
-                event.session_id, event.exchange_order_id,
+                event.session_id, event.order_id,
                 egress::RejectReason::NotOwner);
             return;
         }
-        book_.cancel(event.exchange_order_id);
+        book_.cancel(event.order_id);
     }
 }
 
@@ -346,23 +344,21 @@ void MainProcess::gatewayLoop(std::stop_token stopToken) {
             });
 
         while (!stopToken.stop_requested()) {
+            // Preserve bounded fairness between private events, public depth,
+            // and socket readiness processing.
+            std::size_t drained = 0;
+            while (drained < kMaxEventsPerIteration && clientEgress_.front()) {
+                gateway.route(*clientEgress_.front());
+                clientEgress_.pop();
+                ++drained;
+                ++routedEvents;
+            }
 
-        // TCP sessions are added next. For now this establishes the sole queue
-        // consumer and preserves bounded fairness between private events and
-        // public depth publication.
-        std::size_t drained = 0;
-        while (drained < kMaxEventsPerIteration && clientEgress_.front()) {
-            gateway.route(*clientEgress_.front());
-            clientEgress_.pop();
-            ++drained;
-            ++routedEvents;
-        }
-
-        if (depthMailbox_.tryReadNew(lastDepthVersion, depth)) {
-            gateway.broadcastDepth(depth);
-            lastDepthSequence = depth.sequence;
-            ++depthPublications;
-        }
+            if (depthMailbox_.tryReadNew(lastDepthVersion, depth)) {
+                gateway.broadcastDepth(depth);
+                lastDepthSequence = depth.sequence;
+                ++depthPublications;
+            }
 
             gateway.pollOnce(std::chrono::milliseconds(1));
         }

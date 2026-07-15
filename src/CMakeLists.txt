@@ -19,7 +19,6 @@ target_link_libraries(babo_exchange PRIVATE
     nlohmann_json::nlohmann_json
     MPMCQueue::MPMCQueue
     SPSCQueue::SPSCQueue
-    MPMCQueue::MPMCQueue
     babobook
     ixwebsocket)
 

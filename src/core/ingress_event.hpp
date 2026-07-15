@@ -13,6 +13,7 @@ enum class IngressEventType : std::uint8_t { New, Modify, Cancel };
 struct IngressEvent {
     IngressSource source{IngressSource::Feed};
     IngressEventType type{};
+    std::uint64_t sequence{};
     SessionId session_id{};
     ClientOrderId client_order_id{};
     ExchangeOrderId order_id{};

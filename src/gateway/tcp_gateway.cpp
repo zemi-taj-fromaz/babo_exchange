@@ -204,8 +204,8 @@ void TcpGateway::processCommand(int fd, std::string_view line) {
             auto& session = it->second;
             core::IngressEvent event;
             event.source = core::IngressSource::Client;
-            event.action = core::IngressAction::New;
-            event.exchange_order_id =
+            event.type = core::IngressEventType::New;
+            event.order_id =
                 core::makeClientOrderId(next_exchange_order_sequence_++);
             event.session_id = session.id;
             event.client_order_id = session.next_client_order_id++;
@@ -226,8 +226,8 @@ void TcpGateway::processCommand(int fd, std::string_view line) {
         }
         core::IngressEvent event;
         event.source = core::IngressSource::Client;
-        event.action = core::IngressAction::Cancel;
-        event.exchange_order_id = orderId;
+        event.type = core::IngressEventType::Cancel;
+        event.order_id = orderId;
         event.session_id = it->second.id;
         if (!submit_(event)) queueWrite(fd, "ERROR ingress_busy\n");
         return;

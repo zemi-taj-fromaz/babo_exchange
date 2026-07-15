@@ -17,8 +17,8 @@
 namespace babo {
 
 MainProcess::MainProcess()
-    : snapshotFuture_(snapshotPromise_.get_future()), clientEgress_(1u << 14),
-      clientOrderListener_(clientEgress_), ingress_(1u << 16) {
+    : snapshotFuture_(snapshotPromise_.get_future()), clientEgress_(1u << 12),
+      clientOrderListener_(clientEgress_), ingress_(1u << 13) {
     book_.set_order_listener(&clientOrderListener_);
     gatewayThread_ =
         std::jthread([this](std::stop_token st) { gatewayLoop(st); });

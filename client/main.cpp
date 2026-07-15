@@ -12,6 +12,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -27,6 +28,7 @@ namespace {
 
 constexpr std::size_t kDepthLevels = 5;
 constexpr std::size_t kMaxVisibleActiveOrders = 6;
+constexpr std::size_t kDepthBarWidth = 20;
 constexpr double kPriceScale = 100.0;
 constexpr std::uint64_t kQtyScale = 100'000'000;
 
@@ -44,6 +46,11 @@ struct ActiveOrder {
     std::uint64_t remainingQtyLots = 0;
 };
 
+struct PendingBuyReservation {
+    std::uint64_t token = 0;
+    double cash = 0.0;
+};
+
 struct ClientState {
     bool connected = true;
     std::uint64_t sessionId = 0;
@@ -52,6 +59,9 @@ struct ClientState {
     std::array<DepthLevel, kDepthLevels> bids{};
     std::array<DepthLevel, kDepthLevels> asks{};
     std::unordered_map<std::uint64_t, ActiveOrder> activeOrders;
+    std::deque<PendingBuyReservation> pendingBuyReservations;
+    std::unordered_map<std::uint64_t, double> marketBuyReservations;
+    std::uint64_t nextReservationToken = 1;
     double usdBalance = 100'000.0;
     double btcBalance = 0.0;
     std::string connectionStatus = "Connected - waiting for market data";
@@ -78,6 +88,30 @@ struct OrderReport {
     std::uint64_t qtyLots = 0;
     std::uint64_t remainingQtyLots = 0;
 };
+
+double orderNotional(std::uint64_t qtyLots, std::uint64_t priceTicks) {
+    const auto notional = static_cast<long double>(qtyLots) *
+                          static_cast<long double>(priceTicks) /
+                          (static_cast<long double>(kQtyScale) * kPriceScale);
+    return static_cast<double>(notional);
+}
+
+double availableCash(const ClientState& state) {
+    long double reserved = 0.0L;
+    for (const auto& pending : state.pendingBuyReservations) {
+        reserved += pending.cash;
+    }
+    for (const auto& [id, cash] : state.marketBuyReservations) {
+        reserved += cash;
+    }
+    for (const auto& [id, order] : state.activeOrders) {
+        if (order.side == 'B' && order.priceTicks != 0) {
+            reserved += orderNotional(order.remainingQtyLots,
+                                      order.priceTicks);
+        }
+    }
+    return std::max(0.0, state.usdBalance - static_cast<double>(reserved));
+}
 
 template <typename Integer>
 bool parseInteger(std::string_view input, Integer& result) {
@@ -170,13 +204,24 @@ void applyOrderReport(const OrderReport& report, ClientState& state) {
     auto active = state.activeOrders.find(report.clientOrderId);
 
     switch (report.type) {
-    case ReportType::Accepted:
+    case ReportType::Accepted: {
+        double pendingReservation = 0.0;
+        if (report.side == 'B' && !state.pendingBuyReservations.empty()) {
+            pendingReservation = state.pendingBuyReservations.front().cash;
+            state.pendingBuyReservations.pop_front();
+        }
         state.activeOrders[report.clientOrderId] = ActiveOrder{
             report.clientOrderId, report.exchangeOrderId, report.side,
             report.priceTicks, report.remainingQtyLots};
+        if (report.side == 'B' && report.priceTicks == 0 &&
+            pendingReservation > 0.0) {
+            state.marketBuyReservations[report.clientOrderId] =
+                pendingReservation;
+        }
         state.activity = "Order " + std::to_string(report.clientOrderId) +
                          " accepted";
         break;
+    }
     case ReportType::Fill: {
         const double btc = static_cast<double>(report.qtyLots) / kQtyScale;
         const double usd = btc *
@@ -184,6 +229,14 @@ void applyOrderReport(const OrderReport& report, ClientState& state) {
         if (report.side == 'B') {
             state.usdBalance -= usd;
             state.btcBalance += btc;
+            const auto reservation =
+                state.marketBuyReservations.find(report.clientOrderId);
+            if (reservation != state.marketBuyReservations.end()) {
+                reservation->second = std::max(0.0, reservation->second - usd);
+                if (report.remainingQtyLots == 0) {
+                    state.marketBuyReservations.erase(reservation);
+                }
+            }
         } else {
             state.usdBalance += usd;
             state.btcBalance -= btc;
@@ -200,6 +253,12 @@ void applyOrderReport(const OrderReport& report, ClientState& state) {
     }
     case ReportType::Cancelled:
     case ReportType::Rejected:
+        if (report.type == ReportType::Rejected && report.side == 'B' &&
+            active == state.activeOrders.end() &&
+            !state.pendingBuyReservations.empty()) {
+            state.pendingBuyReservations.pop_front();
+        }
+        state.marketBuyReservations.erase(report.clientOrderId);
         if (active != state.activeOrders.end()) {
             state.activeOrders.erase(active);
         }
@@ -275,6 +334,9 @@ bool applyGatewayLine(std::string_view line, ClientState& state) {
     }
     if (line.starts_with("COMMANDS ")) return true;
     if (line.starts_with("ERROR ")) {
+        if (!state.pendingBuyReservations.empty()) {
+            state.pendingBuyReservations.pop_front();
+        }
         state.activity = std::string(line);
         return true;
     }
@@ -350,13 +412,49 @@ std::string btc(double value) {
     return output.str();
 }
 
-std::string depthRow(std::string_view side, const DepthLevel& level) {
-    std::ostringstream row;
-    row << std::left << std::setw(6) << side << std::right << std::setw(15)
-        << fixedDecimal(level.priceTicks, 100, 2) << std::setw(18)
-        << fixedDecimal(level.qtyLots, 100'000'000, 8) << std::setw(10)
-        << level.orderCount;
-    return row.str();
+ftxui::Element depthColumn(std::string value, int width, bool rightAligned) {
+    using namespace ftxui;
+    Element content = text(std::move(value));
+    if (rightAligned) {
+        content = hbox({filler(), std::move(content)});
+    }
+    return std::move(content) | size(WIDTH, EQUAL, width);
+}
+
+ftxui::Element depthHeader() {
+    using namespace ftxui;
+    return hbox({depthColumn("SIDE", 6, false),
+                 depthColumn("PRICE", 15, true),
+                 depthColumn("SIZE", 18, true),
+                 depthColumn("ORDERS", 10, true), text("  "),
+                 depthColumn("DEPTH", static_cast<int>(kDepthBarWidth), false)}) |
+           bold;
+}
+
+ftxui::Element renderDepthRow(std::string_view side, const DepthLevel& level,
+                              std::uint64_t maxVisibleQty, bool isBid) {
+    using namespace ftxui;
+    float ratio = maxVisibleQty == 0
+                      ? 0.0F
+                      : static_cast<float>(level.qtyLots) /
+                            static_cast<float>(maxVisibleQty);
+    if (level.qtyLots != 0) {
+        ratio = std::max(ratio, 1.0F / static_cast<float>(kDepthBarWidth));
+    }
+    const auto sideColor = isBid ? Color::Green : Color::Red;
+    auto bar = gaugeRight(ratio) |
+               size(WIDTH, EQUAL, static_cast<int>(kDepthBarWidth)) |
+               color(sideColor);
+
+    return hbox({
+               depthColumn(std::string(side), 6, false),
+               depthColumn(fixedDecimal(level.priceTicks, 100, 2), 15, true),
+               depthColumn(fixedDecimal(level.qtyLots, 100'000'000, 8), 18,
+                           true),
+               depthColumn(std::to_string(level.orderCount), 10, true),
+               text("  "), std::move(bar),
+           }) |
+           color(sideColor);
 }
 
 ftxui::Element renderMarketSummary(const ClientState& state) {
@@ -430,17 +528,25 @@ ftxui::Element renderScreen(const ClientState& state,
                             const ftxui::Component& commandInput,
                             const ftxui::Component& submitButton) {
     using namespace ftxui;
+    std::uint64_t maxVisibleQty = 0;
+    for (const auto& level : state.bids) {
+        maxVisibleQty = std::max(maxVisibleQty, level.qtyLots);
+    }
+    for (const auto& level : state.asks) {
+        maxVisibleQty = std::max(maxVisibleQty, level.qtyLots);
+    }
+
     Elements depthRows;
-    depthRows.push_back(text("SIDE            PRICE              SIZE    ORDERS") | bold);
+    depthRows.push_back(depthHeader());
     depthRows.push_back(separator());
     for (std::size_t i = kDepthLevels; i-- > 0;) {
-        depthRows.push_back(text(depthRow("ASK", state.asks[i])) |
-                            color(Color::Red));
+        depthRows.push_back(
+            renderDepthRow("ASK", state.asks[i], maxVisibleQty, false));
     }
     depthRows.push_back(separator());
     for (std::size_t i = 0; i < kDepthLevels; ++i) {
-        depthRows.push_back(text(depthRow("BID", state.bids[i])) |
-                            color(Color::Green));
+        depthRows.push_back(
+            renderDepthRow("BID", state.bids[i], maxVisibleQty, true));
     }
 
     const std::string session = state.sessionId == 0
@@ -462,8 +568,6 @@ ftxui::Element renderScreen(const ClientState& state,
                          color(state.connected ? Color::Green : Color::Red)}),
                separator(),
                hbox({text("Session: " + session), text("  "),
-                     text("Depth: " + std::to_string(state.depthSequence)),
-                     text("  "),
                      text("Orders: " +
                           std::to_string(state.orderEventSequence)),
                      filler()}),
@@ -506,6 +610,8 @@ int runClient() {
         if (line.empty()) return;
 
         std::string outbound = line;
+        double buyReservation = 0.0;
+        std::uint64_t reservationToken = 0;
         std::istringstream input(line);
         std::vector<std::string> parts;
         for (std::string part; input >> part;) parts.push_back(std::move(part));
@@ -533,7 +639,7 @@ int runClient() {
             double balance = 0.0;
             {
                 std::scoped_lock lock(stateMutex);
-                balance = verb == "buy" ? state.usdBalance
+                balance = verb == "buy" ? availableCash(state)
                                          : state.btcBalance;
             }
             if (balance <= 0.0) {
@@ -560,6 +666,8 @@ int runClient() {
                     return;
                 }
                 outbound = "buy " + fixedDecimal(cashTicks, 100, 2);
+                buyReservation =
+                    static_cast<double>(cashTicks) / kPriceScale;
             } else {
                 const double scaled = balance * static_cast<double>(kQtyScale);
                 if (scaled >=
@@ -609,6 +717,10 @@ int runClient() {
             }
             outbound = verb + " " + fixedDecimal(qtyLots, kQtyScale, 8) +
                        " " + fixedDecimal(limitPriceTicks, 100, 2);
+            if (verb == "buy") {
+                buyReservation =
+                    static_cast<double>(notionalTicks) / kPriceScale;
+            }
         } else if (verb == "sell" && parts.size() == 2) {
             std::uint64_t usdCents = 0;
             try {
@@ -643,10 +755,45 @@ int runClient() {
                    (parts.size() == 2 || parts.size() == 3)) {
             // buy <usd> is converted by the engine; two-argument commands are
             // limit orders whose quantity is already expressed in BTC.
+            if (verb == "buy") {
+                try {
+                    if (parts.size() == 2) {
+                        const auto cashTicks =
+                            babo::feed::parsePriceTicks(parts[1]);
+                        buyReservation =
+                            static_cast<double>(cashTicks) / kPriceScale;
+                    } else {
+                        const auto qtyLots =
+                            babo::feed::parseQtyLots(parts[1]);
+                        const auto priceTicks =
+                            babo::feed::parsePriceTicks(parts[2]);
+                        buyReservation = orderNotional(qtyLots, priceTicks);
+                    }
+                } catch (const std::exception&) {
+                    std::scoped_lock lock(stateMutex);
+                    state.activity = "Invalid buy order";
+                    return;
+                }
+            }
         } else {
             std::scoped_lock lock(stateMutex);
             state.activity = "Unknown order command";
             return;
+        }
+
+        if (verb == "buy") {
+            std::scoped_lock lock(stateMutex);
+            const auto available = availableCash(state);
+            if (buyReservation <= 0.0 ||
+                buyReservation > available + 1e-9) {
+                state.activity = "Insufficient cash: need " +
+                                 dollars(buyReservation) + ", available " +
+                                 dollars(available);
+                return;
+            }
+            reservationToken = state.nextReservationToken++;
+            state.pendingBuyReservations.push_back(
+                PendingBuyReservation{reservationToken, buyReservation});
         }
 
         try {
@@ -660,6 +807,17 @@ int runClient() {
             command.clear();
         } catch (const std::exception& error) {
             std::scoped_lock lock(stateMutex);
+            if (reservationToken != 0) {
+                const auto reservation = std::find_if(
+                    state.pendingBuyReservations.begin(),
+                    state.pendingBuyReservations.end(),
+                    [reservationToken](const auto& pending) {
+                        return pending.token == reservationToken;
+                    });
+                if (reservation != state.pendingBuyReservations.end()) {
+                    state.pendingBuyReservations.erase(reservation);
+                }
+            }
             state.activity = error.what();
         }
     };

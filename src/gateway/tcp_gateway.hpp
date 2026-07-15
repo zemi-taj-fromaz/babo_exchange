@@ -6,6 +6,7 @@
 #include "egress/depth_snapshot.hpp"
 #include "gateway/socket_poller.hpp"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -28,6 +29,8 @@ public:
     [[nodiscard]] std::size_t sessionCount() const noexcept { return sessions_.size(); }
 
 private:
+    static constexpr std::size_t kMaxSocketEvents = 128;
+
     struct Session {
         core::SessionId id{};
         core::ClientOrderId next_client_order_id{1};
@@ -48,6 +51,7 @@ private:
 
     Submit submit_;
     SocketPoller poller_;
+    std::array<SocketEvent, kMaxSocketEvents> ready_events_{};
     SocketHandle listen_fd_ = kInvalidSocket;
     std::unordered_map<SocketHandle, Session> sessions_;
     std::unordered_map<core::SessionId, SocketHandle> session_fds_;

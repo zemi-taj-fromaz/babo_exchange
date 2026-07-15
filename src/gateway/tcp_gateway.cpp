@@ -30,6 +30,11 @@ namespace {
 constexpr std::size_t kMaxInputBytes = 16 * 1024;
 constexpr std::size_t kMaxOutputBytes = 1024 * 1024;
 constexpr std::size_t kMaxCommandsPerRead = 64;
+#if defined(__linux__)
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
 
 #if defined(_WIN32)
 std::string socketError() {
@@ -159,10 +164,9 @@ TcpGateway::~TcpGateway() {
 }
 
 void TcpGateway::pollOnce(std::chrono::milliseconds timeout) {
-    std::array<SocketEvent, 128> events{};
-    const int count = poller_.wait(events, timeout);
+    const int count = poller_.wait(ready_events_, timeout);
     for (int i = 0; i < count; ++i) {
-        const auto event = events[i];
+        const auto event = ready_events_[i];
         if (event.fd == listen_fd_) {
             if (event.readable) acceptReady();
             continue;
@@ -350,7 +354,7 @@ void TcpGateway::flushPendingSocketWrites(SocketHandle fd) {
         const auto sent =
             ::send(fd, data, static_cast<int>(std::min<std::size_t>(
                                  remaining, static_cast<std::size_t>(INT_MAX))),
-                   0);
+                   kSendFlags);
         if (sent > 0) {
             session.output_offset += static_cast<std::size_t>(sent);
             continue;

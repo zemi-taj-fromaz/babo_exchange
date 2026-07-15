@@ -22,6 +22,9 @@ struct IngressEvent {
     char side{}; // 'B' or 'S'
     std::uint64_t price_ticks{};
     std::uint64_t qty_lots{};
+    // Quote-currency budget for a market buy, expressed in price ticks
+    // (USD cents for BTC/USD). Zero for every other order type.
+    std::uint64_t quote_notional_ticks{};
     std::uint64_t original_qty_lots{};
     std::uint64_t traded_qty_lots{};
 };

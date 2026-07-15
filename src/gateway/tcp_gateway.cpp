@@ -200,7 +200,8 @@ void TcpGateway::acceptReady() {
             session_fds_.emplace(sessionId, fd);
             poller_.add(fd);
             queueWrite(fd, "SESSION " + std::to_string(sessionId) +
-                               "\nCOMMANDS buy <qty> <price> | sell <qty> <price> | cancel <order_id>\n");
+                               "\nCOMMANDS buy <usd> | sell <qty> | "
+                               "buy|sell <qty> <price> | cancel <order_id>\n");
             spdlog::info("gateway: session {} connected (fd={})", sessionId,
                          static_cast<std::uint64_t>(fd));
         } catch (...) {
@@ -255,6 +256,34 @@ void TcpGateway::processCommand(SocketHandle fd, std::string_view line) {
     if (it == sessions_.end()) return;
     std::size_t count = 0;
     const auto parts = split(line, count);
+    if (count == 2 && (parts[0] == "buy" || parts[0] == "sell")) {
+        try {
+            auto& session = it->second;
+            core::IngressEvent event;
+            event.source = core::IngressSource::Client;
+            event.type = core::IngressEventType::New;
+            event.order_id =
+                core::makeClientOrderId(next_exchange_order_sequence_++);
+            event.session_id = session.id;
+            event.client_order_id = session.next_client_order_id++;
+            event.side = parts[0] == "buy" ? 'B' : 'S';
+            if (event.side == 'B') {
+                event.quote_notional_ticks = feed::parsePriceTicks(parts[1]);
+                if (event.quote_notional_ticks == 0) {
+                    throw std::invalid_argument("zero");
+                }
+            } else {
+                event.qty_lots = feed::parseQtyLots(parts[1]);
+                if (event.qty_lots == 0) {
+                    throw std::invalid_argument("zero");
+                }
+            }
+            if (!submit_(event)) queueWrite(fd, "ERROR ingress_busy\n");
+        } catch (const std::exception&) {
+            queueWrite(fd, "ERROR usage: buy <usd> | sell <qty>\n");
+        }
+        return;
+    }
     if (count == 3 && (parts[0] == "buy" || parts[0] == "sell")) {
         try {
             const auto qty = feed::parseQtyLots(parts[1]);
@@ -301,6 +330,8 @@ void TcpGateway::route(const egress::ClientOrderEvent& event) {
     line << eventName(event.type) << " seq=" << event.event_sequence
          << " client_order_id=" << event.client_order_id
          << " order_id=" << event.exchange_order_id
+         << " side="
+         << ((event.side == 'B' || event.side == 'S') ? event.side : '-')
          << " price_ticks=" << event.price_ticks << " qty_lots=" << event.qty_lots
          << " remaining_qty_lots=" << event.remaining_qty_lots
          << " role=" << static_cast<int>(event.fill_role)

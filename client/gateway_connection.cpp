@@ -1,6 +1,8 @@
 #include "gateway_connection.hpp"
 
+#include <algorithm>
 #include <cerrno>
+#include <climits>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -39,6 +41,12 @@ bool interrupted() {
 void closeSocket(int fd) noexcept {
     if (fd >= 0) ::close(fd);
 }
+#endif
+
+#if defined(__linux__)
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
 #endif
 } // namespace
 
@@ -138,6 +146,32 @@ void GatewayConnection::run(std::stop_token stopToken,
         if (interrupted()) continue;
         if (!stopToken.stop_requested()) onDisconnect(socketError());
         return;
+    }
+}
+
+void GatewayConnection::sendLine(std::string_view line) {
+    std::scoped_lock lock(send_mutex_);
+    std::string framed(line);
+    if (framed.empty() || framed.back() != '\n') {
+        framed.push_back('\n');
+    }
+
+    std::size_t offset = 0;
+    while (offset < framed.size()) {
+        const auto remaining = framed.size() - offset;
+        const auto sent = ::send(
+            fd_, framed.data() + offset,
+            static_cast<int>(std::min<std::size_t>(
+                remaining, static_cast<std::size_t>(INT_MAX))),
+            kSendFlags);
+        if (sent > 0) {
+            offset += static_cast<std::size_t>(sent);
+            continue;
+        }
+        if (interrupted()) {
+            continue;
+        }
+        throw std::runtime_error("send: " + socketError());
     }
 }
 

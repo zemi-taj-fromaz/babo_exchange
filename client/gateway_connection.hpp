@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <stop_token>
+#include <string>
 #include <string_view>
 
 #if defined(_WIN32)
@@ -29,6 +31,7 @@ public:
 
     void run(std::stop_token stopToken, const LineHandler& onLine,
              const DisconnectHandler& onDisconnect);
+    void sendLine(std::string_view line);
     void stop() noexcept;
 
 private:
@@ -38,6 +41,7 @@ private:
 #else
     int fd_ = -1;
 #endif
+    std::mutex send_mutex_;
 };
 
 } // namespace babo::client

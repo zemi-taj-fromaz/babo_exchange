@@ -7,8 +7,10 @@
 
 #include <chrono>
 #include <atomic>
+#include <algorithm>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -41,6 +43,7 @@ MainProcess::~MainProcess() {
 
 namespace {
 constexpr double kPriceScale = 100.0;         // USD -> integer cents
+constexpr std::uint64_t kQtyScale = 100'000'000; // BTC -> integer lots
 } // namespace
 
 std::size_t MainProcess::seedSide(const std::vector<feed::RestingOrder>& orders,
@@ -277,22 +280,67 @@ void MainProcess::applyFeedEvent(const core::IngressEvent& event) {
     }
 }
 
+std::uint64_t MainProcess::marketBuyQuantity(
+    std::uint64_t quoteNotionalTicks) {
+    if (quoteNotionalTicks == 0 ||
+        quoteNotionalTicks >
+            std::numeric_limits<std::uint64_t>::max() / kQtyScale) {
+        return 0;
+    }
+
+    // Keep the budget in cent-lots so walking multiple ask levels remains
+    // exact: one fill costs price_ticks * qty_lots cent-lots.
+    std::uint64_t remainingBudget = quoteNotionalTicks * kQtyScale;
+    std::uint64_t quantity = 0;
+    for (auto level = book_.asks().begin();
+         level != book_.asks().end() && remainingBudget != 0; ++level) {
+        if (level->_price == 0) {
+            continue;
+        }
+        const auto affordable = remainingBudget / level->_price;
+        if (affordable == 0) {
+            break;
+        }
+        const auto taken = std::min(level->_quantity, affordable);
+        if (taken > std::numeric_limits<std::uint64_t>::max() - quantity) {
+            return 0;
+        }
+        quantity += taken;
+        remainingBudget -= taken * level->_price;
+    }
+    return quantity;
+}
+
 void MainProcess::applyClientEvent(const core::IngressEvent& event) {
     if (event.type == core::IngressEventType::New) {
         if (!core::isClientOrderId(event.order_id) ||
-            event.session_id == 0 || event.price_ticks == 0 ||
-            event.qty_lots == 0 || (event.side != 'B' && event.side != 'S')) {
+            event.session_id == 0 || (event.side != 'B' && event.side != 'S')) {
             return;
         }
+
+        const bool isMarket = event.price_ticks == book::MARKET_ORDER_PRICE;
+        std::uint64_t quantity = event.qty_lots;
+        if (isMarket && event.side == 'B') {
+            if (event.quote_notional_ticks == 0) {
+                return;
+            }
+            quantity = marketBuyQuantity(event.quote_notional_ticks);
+        } else if (quantity == 0) {
+            return;
+        }
+
         if (!clientOrderListener_.trackClientOrder(
                 event.order_id, event.session_id, event.client_order_id,
-                event.price_ticks, event.qty_lots)) {
+                event.side, event.price_ticks, quantity)) {
             return;
         }
         simple::SimpleOrder order(event.side == 'B', event.price_ticks,
-                                  event.qty_lots);
+                                  quantity);
         order.order_id_ = event.order_id;
         book_.add(order);
+        if (isMarket) {
+            clientOrderListener_.finishImmediateOrder(event.order_id);
+        }
         return;
     }
     if (event.type == core::IngressEventType::Cancel) {

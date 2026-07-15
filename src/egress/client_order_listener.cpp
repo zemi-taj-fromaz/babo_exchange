@@ -10,15 +10,15 @@ ClientOrderListener::ClientOrderListener(ClientOrderEventQueue& events) noexcept
 
 bool ClientOrderListener::trackClientOrder(
     core::ExchangeOrderId exchangeOrderId, core::SessionId sessionId,
-    core::ClientOrderId clientOrderId, std::uint64_t priceTicks,
+    core::ClientOrderId clientOrderId, char side, std::uint64_t priceTicks,
     std::uint64_t qtyLots) {
     if (!core::isClientOrderId(exchangeOrderId) || sessionId == 0) {
         return false;
     }
     return client_orders_
         .try_emplace(exchangeOrderId,
-                     ClientOrderState{sessionId, clientOrderId, priceTicks,
-                                      qtyLots})
+                     ClientOrderState{sessionId, clientOrderId, side,
+                                      priceTicks, qtyLots})
         .second;
 }
 
@@ -40,6 +40,20 @@ void ClientOrderListener::emitCancelRejected(
     events_.push(event);
 }
 
+void ClientOrderListener::finishImmediateOrder(
+    core::ExchangeOrderId exchangeOrderId) {
+    const auto it = client_orders_.find(exchangeOrderId);
+    if (it == client_orders_.end()) {
+        return;
+    }
+    auto event =
+        makeEvent(ClientOrderEventType::Cancelled, exchangeOrderId, it->second);
+    event.qty_lots = it->second.remaining_qty_lots;
+    event.remaining_qty_lots = 0;
+    events_.push(event);
+    client_orders_.erase(it);
+}
+
 ClientOrderEvent ClientOrderListener::makeEvent(
     ClientOrderEventType type, core::ExchangeOrderId orderId,
     const ClientOrderState& state) {
@@ -49,6 +63,7 @@ ClientOrderEvent ClientOrderListener::makeEvent(
     event.target_session_id = state.session_id;
     event.client_order_id = state.client_order_id;
     event.exchange_order_id = orderId;
+    event.side = state.side;
     event.price_ticks = state.price_ticks;
     event.remaining_qty_lots = state.remaining_qty_lots;
     return event;

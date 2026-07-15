@@ -36,6 +36,7 @@ struct ClientOrderEvent {
     core::SessionId target_session_id{};
     core::ClientOrderId client_order_id{};
     core::ExchangeOrderId exchange_order_id{};
+    char side{}; // 'B' or 'S'
     std::uint64_t price_ticks{};
     std::uint64_t qty_lots{};
     std::uint64_t remaining_qty_lots{};

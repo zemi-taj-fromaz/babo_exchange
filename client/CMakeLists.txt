@@ -3,7 +3,9 @@ add_executable(babo_client
     gateway_connection.cpp)
 
 target_compile_features(babo_client PRIVATE cxx_std_20)
-target_include_directories(babo_client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(babo_client PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/src)
 
 target_link_libraries(babo_client PRIVATE
     ftxui::screen

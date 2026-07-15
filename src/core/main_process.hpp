@@ -62,6 +62,8 @@ private:
     void applyIngressEvent(const core::IngressEvent& event);
     void applyFeedEvent(const core::IngressEvent& event);
     void applyClientEvent(const core::IngressEvent& event);
+    [[nodiscard]] std::uint64_t marketBuyQuantity(
+        std::uint64_t quoteNotionalTicks);
 
     // Engine-thread only: copy the current top-five book into the latest-value
     // mailbox. The gateway may skip intermediate versions but never reads book_.

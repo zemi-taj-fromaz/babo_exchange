@@ -25,6 +25,7 @@ public:
     bool trackClientOrder(core::ExchangeOrderId exchangeOrderId,
                           core::SessionId sessionId,
                           core::ClientOrderId clientOrderId,
+                          char side,
                           std::uint64_t priceTicks,
                           std::uint64_t qtyLots);
 
@@ -33,6 +34,9 @@ public:
     void emitCancelRejected(core::SessionId sessionId,
                             core::ExchangeOrderId exchangeOrderId,
                             RejectReason reason);
+    // Market/IOC remainders never rest in matching_book, so close any client
+    // state still present after book.add() returns.
+    void finishImmediateOrder(core::ExchangeOrderId exchangeOrderId);
 
     void on_accept(const std::uint64_t& orderId) override;
     void on_reject(const std::uint64_t& orderId, const char* reason) override;
@@ -50,6 +54,7 @@ private:
     struct ClientOrderState {
         core::SessionId session_id{};
         core::ClientOrderId client_order_id{};
+        char side{};
         std::uint64_t price_ticks{};
         std::uint64_t remaining_qty_lots{};
     };

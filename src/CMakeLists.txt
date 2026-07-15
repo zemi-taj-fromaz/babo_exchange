@@ -35,3 +35,7 @@ endif()
 if(MINGW)
     target_link_options(babo_exchange PRIVATE -static)
 endif()
+
+if(WIN32)
+    target_link_libraries(babo_exchange PRIVATE ws2_32)
+endif()

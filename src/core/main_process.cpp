@@ -6,8 +6,12 @@
 #include "gateway/tcp_gateway.hpp"
 
 #include <chrono>
+#include <atomic>
 #include <cstdint>
 #include <exception>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
 #include <utility>
 
 namespace babo {
@@ -118,6 +122,11 @@ void MainProcess::enqueueFeedEvent(const feed::OrderEvent& event) {
     ingressEvent.order_id = event.order_id;
     ingressEvent.price_ticks = event.price_ticks;
     ingressEvent.qty_lots = event.qty_lots;
+    ingressEvent.original_qty_lots = event.original_qty_lots;
+    ingressEvent.traded_qty_lots = event.traded_qty_lots;
+    ingressEvent.order_subtype = event.order_subtype;
+    ingressEvent.active_orderbook_order =
+        event.source == feed::OrderSource::OrderBook;
     ingressEvent.side = event.side;
     switch (event.type) {
     case feed::OrderEventType::New: ingressEvent.type = core::IngressEventType::New; break;
@@ -149,19 +158,60 @@ void MainProcess::applyFeedEvent(const core::IngressEvent& event) {
     const auto price_ticks = event.price_ticks;
     const auto qty_lots = event.qty_lots;
 
+    // Stop-order lifecycle events are not active visible-book orders. Bitstamp
+    // emits a separate orderbook-source event when an order becomes active.
+    if (!event.active_orderbook_order) {
+        return;
+    }
+
     switch (event.type) {
     case core::IngressEventType::New: {
-        if (price_ticks == 0 || qty_lots == 0) {
+        const auto original_qty =
+            event.original_qty_lots != 0 ? event.original_qty_lots : qty_lots;
+        if (original_qty == 0 || (event.side != 'B' && event.side != 'S')) {
             return;
         }
         if (book_.bids().find_order(event.order_id) ||
             book_.asks().find_order(event.order_id)) {
-            spdlog::warn("engine: duplicate NEW id={} ignored", event.order_id);
             return;
         }
 
-        simple::SimpleOrder order(event.side == 'B', price_ticks, qty_lots);
+        // Bitstamp explicitly identifies subtype 2 as MARKET. Other aggressive
+        // subtypes still carry a protection price and must not cross beyond it.
+        const bool is_market = event.order_subtype == 2;
+        if (!is_market && price_ticks == 0) {
+            return;
+        }
+
+        // Subtype 5 is maker-or-cancel (post-only). It must never remove
+        // liquidity. If it crosses our current opposite best, Bitstamp would
+        // cancel it rather than execute it.
+        if (event.order_subtype == 5) {
+            const auto* oppositeBest = event.side == 'B'
+                                           ? book_.asks().get_best()
+                                           : book_.bids().get_best();
+            const bool crosses =
+                oppositeBest != nullptr &&
+                (event.side == 'B' ? price_ticks >= oppositeBest->_price
+                                   : price_ticks <= oppositeBest->_price);
+            if (crosses) {
+                return;
+            }
+        }
+
+        book::OrderConditions conditions = book::OrderCondition::oc_no_conditions;
+        if (event.order_subtype == 4) {
+            conditions = book::OrderCondition::oc_immediate_or_cancel;
+        } else if (event.order_subtype == 6) {
+            conditions = book::OrderCondition::oc_fill_or_kill;
+        }
+
+        simple::SimpleOrder order(event.side == 'B',
+                                  is_market ? book::MARKET_ORDER_PRICE
+                                            : price_ticks,
+                                  original_qty, 0, conditions);
         order.order_id_ = event.order_id;
+        feedTradedQty_[event.order_id] = event.traded_qty_lots;
         book_.add(order);
         break;
     }
@@ -171,7 +221,24 @@ void MainProcess::applyFeedEvent(const core::IngressEvent& event) {
             existing = book_.asks().find_order(event.order_id);
         }
         if (!existing) {
-            spdlog::warn("engine: MODIFY unknown id={} ignored", event.order_id);
+            // An aggressive order may already be gone because our matcher
+            // applied its fill before Bitstamp's lifecycle confirmation arrived.
+            feedTradedQty_[event.order_id] = event.traded_qty_lots;
+            return;
+        }
+
+        const auto tradedIt = feedTradedQty_.find(event.order_id);
+        const auto previousTraded = tradedIt == feedTradedQty_.end()
+                                        ? std::uint64_t{0}
+                                        : tradedIt->second;
+        const bool fillConfirmation =
+            event.traded_qty_lots > 0 &&
+            price_ticks == existing->price() &&
+            qty_lots <= existing->open_qty() &&
+            (event.traded_qty_lots > previousTraded ||
+             qty_lots < existing->open_qty());
+        feedTradedQty_[event.order_id] = event.traded_qty_lots;
+        if (fillConfirmation) {
             return;
         }
         if (qty_lots == 0) {
@@ -181,15 +248,32 @@ void MainProcess::applyFeedEvent(const core::IngressEvent& event) {
 
         const auto new_price =
             (price_ticks == existing->price()) ? book::PRICE_UNCHANGED : price_ticks;
+        if (new_price == book::PRICE_UNCHANGED &&
+            qty_lots == existing->open_qty()) {
+            return;
+        }
         const auto size_delta =
             static_cast<std::int64_t>(qty_lots) -
             static_cast<std::int64_t>(existing->open_qty());
         book_.replace(event.order_id, size_delta, new_price);
         break;
     }
-    case core::IngressEventType::Cancel:
-        book_.cancel(event.order_id);
+    case core::IngressEventType::Cancel: {
+        const bool fillConfirmation =
+            event.traded_qty_lots > 0 &&
+            (event.qty_lots == 0 ||
+             (event.original_qty_lots != 0 &&
+              event.traded_qty_lots >= event.original_qty_lots));
+        feedTradedQty_.erase(event.order_id);
+        if (fillConfirmation) {
+            return;
+        }
+        if (book_.bids().find_order(event.order_id) ||
+            book_.asks().find_order(event.order_id)) {
+            book_.cancel(event.order_id);
+        }
         break;
+    }
     }
 }
 
@@ -249,23 +333,127 @@ void MainProcess::networkLoop(std::stop_token stopToken) {
 
     bool snapshotPublished = false;
     try {
+        std::vector<feed::OrderEvent> bufferedEvents;
+        bufferedEvents.reserve(1u << 14);
+        std::mutex bufferedEventsMutex;
+        bool buffering = true;
+
+        auto subscriptionPromise = std::make_shared<std::promise<void>>();
+        auto subscriptionFuture = subscriptionPromise->get_future();
+        auto subscriptionSignaled = std::make_shared<std::atomic_bool>(false);
+
+        feed::BitstampFeed liveFeed("btcusd");
+        liveFeed.setOrderHandler(
+            [this, &bufferedEvents, &bufferedEventsMutex,
+             &buffering](const feed::OrderEvent& event) {
+                std::unique_lock lock(bufferedEventsMutex);
+                if (buffering) {
+                    bufferedEvents.push_back(event);
+                    return;
+                }
+                lock.unlock();
+                enqueueFeedEvent(event);
+            });
+        liveFeed.setSubscriptionHandler(
+            [subscriptionPromise = std::move(subscriptionPromise),
+             subscriptionSignaled]() mutable {
+                if (!subscriptionSignaled->exchange(true)) {
+                    subscriptionPromise->set_value();
+                }
+            });
+        liveFeed.start();
+
+        const auto subscriptionDeadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!stopToken.stop_requested()) {
+            if (subscriptionFuture.wait_for(std::chrono::milliseconds(50)) ==
+                std::future_status::ready) {
+                break;
+            }
+            if (std::chrono::steady_clock::now() >= subscriptionDeadline) {
+                throw std::runtime_error(
+                    "timed out waiting for Bitstamp subscription confirmation");
+            }
+        }
+        if (stopToken.stop_requested()) {
+            liveFeed.stop();
+            return;
+        }
+
+        // Establish overlap between the REST snapshot and the buffered stream.
+        // Bitstamp may return a slightly cached snapshot whose timestamp
+        // predates the subscription, which would leave an unrecoverable gap.
+        std::uint64_t firstBufferedMicrotimestamp = 0;
+        const auto firstEventDeadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!stopToken.stop_requested() &&
+               std::chrono::steady_clock::now() < firstEventDeadline) {
+            {
+                std::scoped_lock lock(bufferedEventsMutex);
+                if (!bufferedEvents.empty()) {
+                    firstBufferedMicrotimestamp =
+                        bufferedEvents.front().microtimestamp;
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (stopToken.stop_requested()) {
+            liveFeed.stop();
+            return;
+        }
+
         // The network thread fetches data; the engine thread exclusively owns
         // reconstruction and every subsequent mutation of the matching book.
-        auto snapshot = feed::fetchL3Snapshot("btcusd");
+        feed::L3Snapshot snapshot;
+        std::size_t snapshotAttempts = 0;
+        const auto overlapDeadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        do {
+            snapshot = feed::fetchL3Snapshot("btcusd");
+            ++snapshotAttempts;
+            if (firstBufferedMicrotimestamp == 0 ||
+                snapshot.microtimestamp >= firstBufferedMicrotimestamp) {
+                break;
+            }
+            if (std::chrono::steady_clock::now() >= overlapDeadline) {
+                throw std::runtime_error(
+                    "Bitstamp snapshot never overlapped buffered live stream");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        } while (!stopToken.stop_requested());
+        if (stopToken.stop_requested()) {
+            liveFeed.stop();
+            return;
+        }
+
+        const auto snapshotMicrotimestamp = snapshot.microtimestamp;
         spdlog::info("networkThread: fetched L3 snapshot microtimestamp={} "
-                     "({} bids, {} asks)",
+                     "({} bids, {} asks, attempts={}, first_live={})",
                      snapshot.microtimestamp, snapshot.bids.size(),
-                     snapshot.asks.size());
+                     snapshot.asks.size(), snapshotAttempts,
+                     firstBufferedMicrotimestamp);
         snapshotPromise_.set_value(std::move(snapshot));
         snapshotPublished = true;
 
-        // Showcase trade-off: live subscription starts after the snapshot, so a
-        // small bootstrap gap is possible. Keeping that limitation explicit
-        // avoids coupling the clean ingress architecture to recovery logic.
-        feed::BitstampFeed liveFeed("btcusd");
-        liveFeed.setOrderHandler(
-            [this](const feed::OrderEvent& event) { enqueueFeedEvent(event); });
-        liveFeed.start();
+        std::size_t replayed = 0;
+        std::size_t skipped = 0;
+        {
+            std::scoped_lock lock(bufferedEventsMutex);
+            for (const auto& event : bufferedEvents) {
+                if (event.microtimestamp != 0 && snapshotMicrotimestamp != 0 &&
+                    event.microtimestamp <= snapshotMicrotimestamp) {
+                    ++skipped;
+                    continue;
+                }
+                enqueueFeedEvent(event);
+                ++replayed;
+            }
+            buffering = false;
+        }
+        spdlog::info("networkThread: replayed {} buffered live events "
+                     "after snapshot ({} skipped as already covered)",
+                     replayed, skipped);
 
         while (!stopToken.stop_requested()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));

@@ -80,10 +80,14 @@ void BitstampFeed::setOrderHandler(OrderHandler handler) {
     orderHandler_ = std::move(handler);
 }
 
+void BitstampFeed::setSubscriptionHandler(SubscriptionHandler handler) {
+    subscriptionHandler_ = std::move(handler);
+}
+
 void BitstampFeed::onMessage(const ix::WebSocketMessagePtr& msg) {
     switch (msg->type) {
     case ix::WebSocketMessageType::Open: {
-        spdlog::info("bitstamp ws: connected — subscribing to {}", channel_);
+        spdlog::info("bitstamp ws: connected - subscribing to {}", channel_);
         // {"event":"bts:subscribe","data":{"channel":"live_orders_btcusd"}}
         nlohmann::json sub;
         sub["event"] = "bts:subscribe";
@@ -119,6 +123,9 @@ void BitstampFeed::routeEvent(const std::string& payload) {
 
     if (event == "bts:subscription_succeeded") {
         spdlog::info("bitstamp ws: subscription confirmed for {}", channel_);
+        if (subscriptionHandler_) {
+            subscriptionHandler_();
+        }
         return;
     }
     if (event == "bts:request_reconnect") {
@@ -138,19 +145,31 @@ void BitstampFeed::routeEvent(const std::string& payload) {
     // order_type: 0 = buy (bid), 1 = sell (ask).
     const char side = (d.value("order_type", 0) == 0) ? 'B' : 'S';
     const std::string id = d.value("id_str", "");
-    const std::string price = d.value("price_str", "");
+    const auto orderSubtype = static_cast<std::uint8_t>(d.value("order_subtype", 0));
+    const std::string price = d.value("price_str", "0");
     const std::string amount = d.value("amount_str", "");
+    const std::string amountAtCreate =
+        d.value("amount_at_create", amount);
+    const std::string amountTraded = d.value("amount_traded", "0");
+    const std::string microtimestamp = d.value("microtimestamp", "0");
 
     OrderEvent order;
     try {
+        order.microtimestamp = std::stoull(microtimestamp);
         order.order_id = std::stoull(id);
         order.price_ticks = parsePriceTicks(price);
         order.qty_lots = parseQtyLots(amount);
+        order.original_qty_lots = parseQtyLots(amountAtCreate);
+        order.traded_qty_lots = parseQtyLots(amountTraded);
     } catch (const std::exception& e) {
         spdlog::warn("bitstamp ws: bad order payload: {}", e.what());
         return;
     }
     order.side = side;
+    order.order_subtype = orderSubtype;
+    order.source = j.value("order_source", "orderbook") == "stop_order"
+                       ? OrderSource::StopOrder
+                       : OrderSource::OrderBook;
 
     if (event == "order_created") {
         order.type = OrderEventType::New;

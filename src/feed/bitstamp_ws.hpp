@@ -11,7 +11,7 @@
 namespace babo::feed {
 
 // Streams Bitstamp's public `live_orders_<pair>` L3 channel over a WebSocket.
-// Unlike Coinbase's `full` channel, this is PUBLIC — no authentication.
+// Unlike Coinbase's `full` channel, this is PUBLIC - no authentication.
 //
 // Logging sink for now (does NOT touch the order book): the channel emits
 // order_created -> New, order_changed -> Modify, order_deleted -> Cancel. There
@@ -21,6 +21,7 @@ namespace babo::feed {
 class BitstampFeed {
 public:
     using OrderHandler = std::function<void(const OrderEvent&)>;
+    using SubscriptionHandler = std::function<void()>;
 
 
     explicit BitstampFeed(std::string pair); // e.g. "btcusd"
@@ -32,6 +33,7 @@ public:
     void start(); // connect + subscribe (non-blocking)
     void stop();  // close the connection
     void setOrderHandler(OrderHandler handler);
+    void setSubscriptionHandler(SubscriptionHandler handler);
 
 private:
     void onMessage(const ix::WebSocketMessagePtr& msg);
@@ -41,6 +43,7 @@ private:
     std::string channel_; // "live_orders_btcusd"
     ix::WebSocket ws_;
     OrderHandler orderHandler_;
+    SubscriptionHandler subscriptionHandler_;
 
     std::uint64_t total_ = 0; // order events seen (callback thread only)
 };

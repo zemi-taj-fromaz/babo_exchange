@@ -127,6 +127,12 @@ std::string fixedDecimal(std::uint64_t value, std::uint64_t scale,
     return output.str();
 }
 
+std::string dollarPrice(double ticks) {
+    std::ostringstream output;
+    output << '$' << std::fixed << std::setprecision(2) << ticks / 100.0;
+    return output.str();
+}
+
 std::string depthRow(std::string_view side, const DepthLevel& level) {
     std::ostringstream row;
     row << std::left << std::setw(6) << side << std::right << std::setw(15)
@@ -134,6 +140,36 @@ std::string depthRow(std::string_view side, const DepthLevel& level) {
         << fixedDecimal(level.qtyLots, 100'000'000, 8) << std::setw(10)
         << level.orderCount;
     return row.str();
+}
+
+ftxui::Element renderMarketSummary(const ClientState& state) {
+    using namespace ftxui;
+
+    const auto bestBid = state.bids[0].priceTicks;
+    const auto bestAsk = state.asks[0].priceTicks;
+    if (bestBid == 0 || bestAsk == 0) {
+        return hbox({text("BTC PRICE: --") | bold, filler(),
+                     text("Spread: --")});
+    }
+
+    const double midTicks =
+        (static_cast<double>(bestBid) + static_cast<double>(bestAsk)) / 2.0;
+    const bool crossed = bestBid >= bestAsk;
+    const auto spreadTicks = crossed ? bestBid - bestAsk : bestAsk - bestBid;
+
+    return hbox({
+        text("BTC PRICE: " + dollarPrice(midTicks)) | bold,
+        filler(),
+        text("Best bid: " + dollarPrice(static_cast<double>(bestBid))) |
+            color(Color::Green),
+        text("  "),
+        text("Best ask: " + dollarPrice(static_cast<double>(bestAsk))) |
+            color(Color::Red),
+        text("  "),
+        text(std::string(crossed ? "Crossed: " : "Spread: ") +
+             dollarPrice(static_cast<double>(spreadTicks))) |
+            color(crossed ? Color::Yellow : Color::White),
+    });
 }
 
 ftxui::Element renderBook(const ClientState& state) {
@@ -169,6 +205,7 @@ ftxui::Element renderBook(const ClientState& state) {
                hbox({text("Session: " + session), filler(),
                      text("Depth sequence: " +
                           std::to_string(state.depthSequence))}),
+               renderMarketSummary(state),
                separator(),
                vbox(std::move(rows)) | center,
                separator(),

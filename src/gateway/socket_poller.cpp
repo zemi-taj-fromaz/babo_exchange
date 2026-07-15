@@ -4,7 +4,9 @@
 #include <cerrno>
 #include <system_error>
 
-#if defined(__APPLE__) || defined(__FreeBSD__)
+#if defined(_WIN32)
+#include <stdexcept>
+#elif defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/event.h>
 #include <unistd.h>
 #elif defined(__linux__)
@@ -17,26 +19,48 @@
 namespace babo::gateway {
 
 namespace {
+#if defined(_WIN32)
+[[noreturn]] void fail(const char* operation) {
+    throw std::system_error(::WSAGetLastError(), std::system_category(),
+                            operation);
+}
+#else
 [[noreturn]] void fail(const char* operation) {
     throw std::system_error(errno, std::generic_category(), operation);
 }
+#endif
 } // namespace
 
 SocketPoller::SocketPoller() {
-#if defined(__APPLE__) || defined(__FreeBSD__)
+#if defined(_WIN32)
+    WSADATA data{};
+    const int result = ::WSAStartup(MAKEWORD(2, 2), &data);
+    if (result != 0) {
+        throw std::system_error(result, std::system_category(), "WSAStartup");
+    }
+    wsa_started_ = true;
+#elif defined(__APPLE__) || defined(__FreeBSD__)
     fd_ = ::kqueue();
 #else
     fd_ = ::epoll_create1(EPOLL_CLOEXEC);
 #endif
+#if !defined(_WIN32)
     if (fd_ < 0) fail("create socket poller");
+#endif
 }
 
 SocketPoller::~SocketPoller() {
+#if defined(_WIN32)
+    if (wsa_started_) ::WSACleanup();
+#else
     if (fd_ >= 0) ::close(fd_);
+#endif
 }
 
-void SocketPoller::add(int fd) {
-#if defined(__APPLE__) || defined(__FreeBSD__)
+void SocketPoller::add(SocketHandle fd) {
+#if defined(_WIN32)
+    read_fds_.insert(fd);
+#elif defined(__APPLE__) || defined(__FreeBSD__)
     struct kevent change;
     EV_SET(&change, fd, EVFILT_READ, EV_ADD, 0, 0, nullptr);
     if (::kevent(fd_, &change, 1, nullptr, 0, nullptr) < 0) fail("kevent add");
@@ -48,8 +72,14 @@ void SocketPoller::add(int fd) {
 #endif
 }
 
-void SocketPoller::setWritable(int fd, bool enabled) {
-#if defined(__APPLE__) || defined(__FreeBSD__)
+void SocketPoller::setWritable(SocketHandle fd, bool enabled) {
+#if defined(_WIN32)
+    if (enabled) {
+        write_fds_.insert(fd);
+    } else {
+        write_fds_.erase(fd);
+    }
+#elif defined(__APPLE__) || defined(__FreeBSD__)
     struct kevent change;
     EV_SET(&change, fd, EVFILT_WRITE, enabled ? EV_ADD : EV_DELETE, 0, 0,
            nullptr);
@@ -65,8 +95,11 @@ void SocketPoller::setWritable(int fd, bool enabled) {
 #endif
 }
 
-void SocketPoller::remove(int fd) noexcept {
-#if defined(__APPLE__) || defined(__FreeBSD__)
+void SocketPoller::remove(SocketHandle fd) noexcept {
+#if defined(_WIN32)
+    read_fds_.erase(fd);
+    write_fds_.erase(fd);
+#elif defined(__APPLE__) || defined(__FreeBSD__)
     struct kevent changes[2];
     EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
     EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
@@ -78,7 +111,55 @@ void SocketPoller::remove(int fd) noexcept {
 
 int SocketPoller::wait(std::span<SocketEvent> events,
                        std::chrono::milliseconds timeout) {
-#if defined(__APPLE__) || defined(__FreeBSD__)
+#if defined(_WIN32)
+    if (events.empty()) return 0;
+
+    fd_set readSet;
+    fd_set writeSet;
+    fd_set errorSet;
+    FD_ZERO(&readSet);
+    FD_ZERO(&writeSet);
+    FD_ZERO(&errorSet);
+
+    for (const auto fd : read_fds_) {
+        FD_SET(fd, &readSet);
+        FD_SET(fd, &errorSet);
+    }
+    for (const auto fd : write_fds_) {
+        FD_SET(fd, &writeSet);
+        FD_SET(fd, &errorSet);
+    }
+
+    timeval tv{static_cast<long>(timeout.count() / 1000),
+               static_cast<long>((timeout.count() % 1000) * 1000)};
+    const int readyCount =
+        ::select(0, &readSet, &writeSet, &errorSet, &tv);
+    if (readyCount < 0) {
+        if (::WSAGetLastError() == WSAEINTR) return 0;
+        fail("select wait");
+    }
+
+    int count = 0;
+    for (const auto fd : read_fds_) {
+        if (count >= static_cast<int>(events.size())) break;
+        const bool readable = FD_ISSET(fd, &readSet) != 0;
+        const bool writable = FD_ISSET(fd, &writeSet) != 0;
+        const bool error = FD_ISSET(fd, &errorSet) != 0;
+        if (readable || writable || error) {
+            events[count++] = SocketEvent{fd, readable, writable, error};
+        }
+    }
+    for (const auto fd : write_fds_) {
+        if (read_fds_.contains(fd)) continue;
+        if (count >= static_cast<int>(events.size())) break;
+        const bool writable = FD_ISSET(fd, &writeSet) != 0;
+        const bool error = FD_ISSET(fd, &errorSet) != 0;
+        if (writable || error) {
+            events[count++] = SocketEvent{fd, false, writable, error};
+        }
+    }
+    return count;
+#elif defined(__APPLE__) || defined(__FreeBSD__)
     struct timespec ts{timeout.count() / 1000,
                        (timeout.count() % 1000) * 1'000'000};
     struct kevent ready[128];

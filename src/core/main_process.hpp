@@ -14,6 +14,7 @@
 #include <future>
 #include <stop_token>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace babo {
@@ -81,6 +82,10 @@ private:
     // The matching core. After snapshot reproduction completes, only the engine
     // thread mutates it by draining ingress_.
     book::matching_book<> book_;
+
+    // Last cumulative Bitstamp filled quantity seen per order. Engine-thread
+    // only; used to distinguish venue fill confirmations from client modifies.
+    std::unordered_map<std::uint64_t, std::uint64_t> feedTradedQty_;
 
     // Live-feed + gateway producers, one engine-thread consumer.
     rigtorp::MPMCQueue<core::IngressEvent> ingress_;

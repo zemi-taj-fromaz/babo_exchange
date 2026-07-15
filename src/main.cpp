@@ -10,7 +10,7 @@ namespace {
 
 // Set by the signal handler on Ctrl+C / SIGTERM. The run loop polls it and
 // shuts down cleanly instead of being hard-killed mid-work. Must be lock-free
-// and async-signal-safe — std::atomic<bool> qualifies; almost nothing else does
+// and async-signal-safe - std::atomic<bool> qualifies; almost nothing else does
 // (no logging, no allocation, no mutexes inside a signal handler).
 std::atomic<bool> g_running{true};
 
@@ -31,7 +31,7 @@ int main() {
     // jthreads. Scope exit requests stop and joins them in dependency order.
     babo::MainProcess process;
 
-    spdlog::info("running — press Ctrl+C to stop");
+    spdlog::info("running - press Ctrl+C to stop");
 
     // The process owns all worker loops; main only coordinates signal-driven
     // lifetime.

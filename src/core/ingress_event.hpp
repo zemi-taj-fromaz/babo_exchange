@@ -13,6 +13,8 @@ enum class IngressEventType : std::uint8_t { New, Modify, Cancel };
 struct IngressEvent {
     IngressSource source{IngressSource::Feed};
     IngressEventType type{};
+    std::uint8_t order_subtype{};
+    bool active_orderbook_order{true};
     std::uint64_t sequence{};
     SessionId session_id{};
     ClientOrderId client_order_id{};
@@ -20,6 +22,8 @@ struct IngressEvent {
     char side{}; // 'B' or 'S'
     std::uint64_t price_ticks{};
     std::uint64_t qty_lots{};
+    std::uint64_t original_qty_lots{};
+    std::uint64_t traded_qty_lots{};
 };
 
 static_assert(std::is_trivially_copyable_v<IngressEvent>);

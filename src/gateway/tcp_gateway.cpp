@@ -4,18 +4,25 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cerrno>
+#include <climits>
 #include <cstring>
-#include <netinet/in.h>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
+
+#if defined(_WIN32)
+#include <basetsd.h>
+#else
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <vector>
+#endif
 
 namespace babo::gateway {
 
@@ -24,12 +31,54 @@ constexpr std::size_t kMaxInputBytes = 16 * 1024;
 constexpr std::size_t kMaxOutputBytes = 1024 * 1024;
 constexpr std::size_t kMaxCommandsPerRead = 64;
 
-void setNonBlocking(int fd) {
+#if defined(_WIN32)
+std::string socketError() {
+    return std::to_string(::WSAGetLastError());
+}
+
+bool wouldBlock() {
+    const int error = ::WSAGetLastError();
+    return error == WSAEWOULDBLOCK;
+}
+
+bool interrupted() {
+    return ::WSAGetLastError() == WSAEINTR;
+}
+
+void closeSocket(SocketHandle fd) noexcept {
+    if (fd != kInvalidSocket) ::closesocket(fd);
+}
+
+void setNonBlocking(SocketHandle fd) {
+    u_long enabled = 1;
+    if (::ioctlsocket(fd, FIONBIO, &enabled) != 0) {
+        throw std::runtime_error("ioctlsocket: " + socketError());
+    }
+}
+#else
+std::string socketError() {
+    return std::strerror(errno);
+}
+
+bool wouldBlock() {
+    return errno == EAGAIN || errno == EWOULDBLOCK;
+}
+
+bool interrupted() {
+    return errno == EINTR;
+}
+
+void closeSocket(SocketHandle fd) noexcept {
+    if (fd != kInvalidSocket) ::close(fd);
+}
+
+void setNonBlocking(SocketHandle fd) {
     const int flags = ::fcntl(fd, F_GETFL, 0);
     if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
         throw std::runtime_error(std::string("fcntl: ") + std::strerror(errno));
     }
 }
+#endif
 
 std::array<std::string_view, 4> split(std::string_view line, std::size_t& count) {
     std::array<std::string_view, 4> parts{};
@@ -68,12 +117,17 @@ const char* eventName(egress::ClientOrderEventType type) {
 }
 } // namespace
 
-int TcpGateway::createListenSocket(std::uint16_t port) {
-    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) throw std::runtime_error("socket failed");
+SocketHandle TcpGateway::createListenSocket(std::uint16_t port) {
+    const SocketHandle fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == kInvalidSocket) throw std::runtime_error("socket failed");
     try {
         const int enabled = 1;
-        if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled,
+#if defined(_WIN32)
+        const auto* enabledPtr = reinterpret_cast<const char*>(&enabled);
+#else
+        const auto* enabledPtr = &enabled;
+#endif
+        if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, enabledPtr,
                          sizeof(enabled)) < 0) {
             throw std::runtime_error("setsockopt failed");
         }
@@ -83,12 +137,12 @@ int TcpGateway::createListenSocket(std::uint16_t port) {
         address.sin_port = htons(port);
         address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         if (::bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
-            throw std::runtime_error(std::string("bind: ") + std::strerror(errno));
+            throw std::runtime_error("bind: " + socketError());
         }
         if (::listen(fd, 128) < 0) throw std::runtime_error("listen failed");
         return fd;
     } catch (...) {
-        ::close(fd);
+        closeSocket(fd);
         throw;
     }
 }
@@ -100,8 +154,8 @@ TcpGateway::TcpGateway(Submit submit, std::uint16_t port)
 }
 
 TcpGateway::~TcpGateway() {
-    for (const auto& [fd, session] : sessions_) ::close(fd);
-    if (listen_fd_ >= 0) ::close(listen_fd_);
+    for (const auto& [fd, session] : sessions_) closeSocket(fd);
+    if (listen_fd_ != kInvalidSocket) closeSocket(listen_fd_);
 }
 
 void TcpGateway::pollOnce(std::chrono::milliseconds timeout) {
@@ -125,11 +179,11 @@ void TcpGateway::pollOnce(std::chrono::milliseconds timeout) {
 
 void TcpGateway::acceptReady() {
     for (;;) {
-        const int fd = ::accept(listen_fd_, nullptr, nullptr);
-        if (fd < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
-            if (errno == EINTR) continue;
-            throw std::runtime_error(std::string("accept: ") + std::strerror(errno));
+        const SocketHandle fd = ::accept(listen_fd_, nullptr, nullptr);
+        if (fd == kInvalidSocket) {
+            if (wouldBlock()) return;
+            if (interrupted()) continue;
+            throw std::runtime_error("accept: " + socketError());
         }
         try {
             setNonBlocking(fd);
@@ -143,20 +197,21 @@ void TcpGateway::acceptReady() {
             poller_.add(fd);
             queueWrite(fd, "SESSION " + std::to_string(sessionId) +
                                "\nCOMMANDS buy <qty> <price> | sell <qty> <price> | cancel <order_id>\n");
-            spdlog::info("gateway: session {} connected (fd={})", sessionId, fd);
+            spdlog::info("gateway: session {} connected (fd={})", sessionId,
+                         static_cast<std::uint64_t>(fd));
         } catch (...) {
-            ::close(fd);
+            closeSocket(fd);
             throw;
         }
     }
 }
 
-void TcpGateway::readReady(int fd) {
+void TcpGateway::readReady(SocketHandle fd) {
     auto it = sessions_.find(fd);
     if (it == sessions_.end()) return;
     char buffer[4096];
     for (;;) {
-        const auto received = ::recv(fd, buffer, sizeof(buffer), 0);
+        const auto received = ::recv(fd, buffer, static_cast<int>(sizeof(buffer)), 0);
         if (received > 0) {
             it->second.input.append(buffer, static_cast<std::size_t>(received));
             if (it->second.input.size() > kMaxInputBytes) {
@@ -169,15 +224,15 @@ void TcpGateway::readReady(int fd) {
             closeSession(fd, "peer disconnected");
             return;
         }
-        if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-        closeSession(fd, std::strerror(errno));
+        if (interrupted()) continue;
+        if (wouldBlock()) break;
+        closeSession(fd, socketError());
         return;
     }
     processLines(fd);
 }
 
-void TcpGateway::processLines(int fd) {
+void TcpGateway::processLines(SocketHandle fd) {
     std::size_t processed = 0;
     while (processed < kMaxCommandsPerRead) {
         auto it = sessions_.find(fd);
@@ -191,7 +246,7 @@ void TcpGateway::processLines(int fd) {
     }
 }
 
-void TcpGateway::processCommand(int fd, std::string_view line) {
+void TcpGateway::processCommand(SocketHandle fd, std::string_view line) {
     auto it = sessions_.find(fd);
     if (it == sessions_.end()) return;
     std::size_t count = 0;
@@ -262,13 +317,13 @@ void TcpGateway::broadcastDepth(const egress::DepthSnapshot& snapshot) {
     }
     line << '\n';
     const auto message = line.str();
-    std::vector<int> fds;
+    std::vector<SocketHandle> fds;
     fds.reserve(sessions_.size());
     for (const auto& [fd, session] : sessions_) fds.push_back(fd);
-    for (const int fd : fds) queueWrite(fd, message);
+    for (const auto fd : fds) queueWrite(fd, message);
 }
 
-void TcpGateway::queueWrite(int fd, std::string message) {
+void TcpGateway::queueWrite(SocketHandle fd, std::string message) {
     auto it = sessions_.find(fd);
     if (it == sessions_.end()) return;
     auto& session = it->second;
@@ -285,27 +340,30 @@ void TcpGateway::queueWrite(int fd, std::string message) {
     flushPendingSocketWrites(fd);
 }
 
-void TcpGateway::flushPendingSocketWrites(int fd) {
+void TcpGateway::flushPendingSocketWrites(SocketHandle fd) {
     auto it = sessions_.find(fd);
     if (it == sessions_.end()) return;
     auto& session = it->second;
     while (session.output_offset < session.output.size()) {
         const char* data = session.output.data() + session.output_offset;
         const auto remaining = session.output.size() - session.output_offset;
-        const auto sent = ::send(fd, data, remaining, 0);
+        const auto sent =
+            ::send(fd, data, static_cast<int>(std::min<std::size_t>(
+                                 remaining, static_cast<std::size_t>(INT_MAX))),
+                   0);
         if (sent > 0) {
             session.output_offset += static_cast<std::size_t>(sent);
             continue;
         }
-        if (sent < 0 && errno == EINTR) continue;
-        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        if (sent < 0 && interrupted()) continue;
+        if (sent < 0 && wouldBlock()) {
             if (!session.watching_write) {
                 poller_.setWritable(fd, true);
                 session.watching_write = true;
             }
             return;
         }
-        closeSession(fd, sent == 0 ? "write closed" : std::strerror(errno));
+        closeSession(fd, sent == 0 ? "write closed" : socketError());
         return;
     }
     session.output.clear();
@@ -316,13 +374,13 @@ void TcpGateway::flushPendingSocketWrites(int fd) {
     }
 }
 
-void TcpGateway::closeSession(int fd, std::string_view reason) noexcept {
+void TcpGateway::closeSession(SocketHandle fd, std::string_view reason) noexcept {
     const auto it = sessions_.find(fd);
     if (it == sessions_.end()) return;
     spdlog::info("gateway: session {} disconnected ({})", it->second.id, reason);
     session_fds_.erase(it->second.id);
     poller_.remove(fd);
-    ::close(fd);
+    closeSocket(fd);
     sessions_.erase(it);
 }
 

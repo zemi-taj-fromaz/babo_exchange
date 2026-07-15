@@ -8,7 +8,6 @@
 
 #include <cstdint>
 #include <functional>
-#include <stop_token>
 #include <string>
 #include <unordered_map>
 
@@ -39,19 +38,19 @@ private:
     };
 
     void acceptReady();
-    void readReady(int fd);
-    void processLines(int fd);
-    void processCommand(int fd, std::string_view line);
-    void queueWrite(int fd, std::string message);
-    void flushPendingSocketWrites(int fd);
-    void closeSession(int fd, std::string_view reason) noexcept;
-    static int createListenSocket(std::uint16_t port);
+    void readReady(SocketHandle fd);
+    void processLines(SocketHandle fd);
+    void processCommand(SocketHandle fd, std::string_view line);
+    void queueWrite(SocketHandle fd, std::string message);
+    void flushPendingSocketWrites(SocketHandle fd);
+    void closeSession(SocketHandle fd, std::string_view reason) noexcept;
+    static SocketHandle createListenSocket(std::uint16_t port);
 
     Submit submit_;
     SocketPoller poller_;
-    int listen_fd_ = -1;
-    std::unordered_map<int, Session> sessions_;
-    std::unordered_map<core::SessionId, int> session_fds_;
+    SocketHandle listen_fd_ = kInvalidSocket;
+    std::unordered_map<SocketHandle, Session> sessions_;
+    std::unordered_map<core::SessionId, SocketHandle> session_fds_;
     core::SessionId next_session_id_ = 1;
     std::uint64_t next_exchange_order_sequence_ = 1;
 };

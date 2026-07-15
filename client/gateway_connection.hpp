@@ -5,6 +5,14 @@
 #include <stop_token>
 #include <string_view>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
 namespace babo::client {
 
 // Read-only TCP connection used by the first babo_client slice. It owns one
@@ -24,7 +32,12 @@ public:
     void stop() noexcept;
 
 private:
+#if defined(_WIN32)
+    SOCKET fd_ = INVALID_SOCKET;
+    bool wsa_started_ = false;
+#else
     int fd_ = -1;
+#endif
 };
 
 } // namespace babo::client

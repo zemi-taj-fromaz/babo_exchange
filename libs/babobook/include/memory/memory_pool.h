@@ -5,7 +5,8 @@
 #ifndef BABOMATCHINGENGINE_MEMORY_POOL_H
 #define BABOMATCHINGENGINE_MEMORY_POOL_H
 
-#include <type_traits>
+#include <cstddef>
+#include <memory>
 #include <vector>
 #include <utility>
 #include <unordered_set>
@@ -17,7 +18,7 @@ namespace babo::memory
 template <typename T>
 union PGMemChunk
 {
-    typename std::aligned_storage<sizeof(T), alignof(T)>::type element;
+    alignas(T) std::byte element[sizeof(T)];
     PGMemChunk *next;
 };
 
@@ -57,11 +58,13 @@ public:
             auto chunk = freeList;
             freeList = chunk->next;
 
-            ::new(&(chunk->element)) T(std::forward<Args>(args)...);
+            T* element = std::construct_at(
+                reinterpret_cast<T*>(chunk->element),
+                std::forward<Args>(args)...);
 
             nbElements++;
 
-            return reinterpret_cast<T*>(chunk);
+            return element;
         }
 
         const size_t index = nbElements++;
@@ -75,7 +78,8 @@ public:
         // Todo Check if the chunk was created before creating a new element
         PGMemChunk<T>* chunk = getChunk(index);
 
-        return ::new(&(chunk->element)) T(std::forward<Args>(args)...);
+        return std::construct_at(reinterpret_cast<T*>(chunk->element),
+                                 std::forward<Args>(args)...);
     }
 
     template <typename... Args>
@@ -86,12 +90,13 @@ public:
             auto chunk = freeList;
             freeList = chunk->next;
 
-            ::new(&(chunk->element)) T(std::forward<Args>(args)...);
+            T* ptr = std::construct_at(
+                reinterpret_cast<T*>(chunk->element),
+                std::forward<Args>(args)...);
 
             nbElements++;
 
             // Find the index by calculating from chunk pointer
-            T* ptr = reinterpret_cast<T*>(chunk);
             size_t index = 0;
             for (size_t i = 0; i < size; i++)
             {
@@ -114,7 +119,8 @@ public:
             maxAllocatedIndex = index;
 
         PGMemChunk<T>* chunk = getChunk(index);
-        T* ptr = ::new(&(chunk->element)) T(std::forward<Args>(args)...);
+        T* ptr = std::construct_at(reinterpret_cast<T*>(chunk->element),
+                                   std::forward<Args>(args)...);
 
         return {ptr, index};
     }
@@ -125,7 +131,7 @@ public:
     {
         if (pointer != nullptr)
         {
-            pointer->~T();
+            std::destroy_at(pointer);
 
             reinterpret_cast<PGMemChunk<T>*>(pointer)->next = freeList;
             freeList = reinterpret_cast<PGMemChunk<T>*>(pointer);
@@ -159,8 +165,8 @@ public:
             if (freeSet.find(chunk) == freeSet.end())
             {
                 // This object is still allocated, destroy it
-                T* obj = reinterpret_cast<T*>(chunk);
-                obj->~T();
+                T* obj = reinterpret_cast<T*>(chunk->element);
+                std::destroy_at(obj);
             }
         }
 

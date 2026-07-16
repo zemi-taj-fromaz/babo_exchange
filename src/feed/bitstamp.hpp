@@ -15,7 +15,7 @@ struct RestingOrder {
 };
 
 // Parsed Bitstamp REST L3 order-book snapshot. `microtimestamp` is the venue's
-// as-of stamp (Bitstamp has no per-message sequence like Coinbase).
+// as-of stamp. Live MarketEventIDs are not yet retained by this adapter.
 struct L3Snapshot {
     std::uint64_t microtimestamp{};
     std::vector<RestingOrder> bids;

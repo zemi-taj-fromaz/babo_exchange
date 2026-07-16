@@ -11,7 +11,7 @@
 namespace babo::feed {
 
 // Streams Bitstamp's public `live_orders_<pair>` L3 channel over a WebSocket.
-// Unlike Coinbase's `full` channel, this is PUBLIC - no authentication.
+// This public channel requires no authentication.
 //
 // Logging sink for now (does NOT touch the order book): the channel emits
 // order_created -> New, order_changed -> Modify, order_deleted -> Cancel. There
